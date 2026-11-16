@@ -19,6 +19,13 @@ remote, and the bridge is the thing that knows your TV.
 - **Installs like an app**: web manifest, icons, standalone mode, safe-area aware. Add to Home
   Screen and it opens full screen.
 
+## Bridge requirements
+
+The remote works with a stock couch-tv bridge. **Messages and drawings need three endpoints that are
+not in upstream couch-tv yet**: `POST /api/message`, `GET /api/message`, `POST /api/message/clear`
+(`bridge/say.py` beside them does the optional AI wording). Without them the pad still drives the TV
+and the message sheet answers with a 404.
+
 ## Setup
 
 The app needs to know where the bridge is. On first open, enter its address:
@@ -40,7 +47,7 @@ certificate) and dictation works.
 
 ### From Vercel
 
-1. Import this repo at [vercel.com/new](https://vercel.com/new). The framework is detected; `vercel.json`
+1. Import this repo at [vercel.com/new](https://vercel.com/new) (or press the Deploy button above). The framework is detected; `vercel.json`
    pins the build, the SPA rewrite and the manifest's content type.
 2. Open the deployment on the phone, enter the bridge address, connect.
 3. Add it to the home screen for the full-screen version.
