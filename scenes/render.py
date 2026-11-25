@@ -135,7 +135,10 @@ class Aurora:
         self.sw, self.sh = W // 4, H // 4
         xs = np.arange(self.sw) * 4.0
         self.xs = xs
-        self.rays = np.random.default_rng(seed + 7).uniform(0.4, 1, self.sw)
+        rr = np.random.default_rng(seed + 7).uniform(0, 1, self.sw)
+        k = np.exp(-np.linspace(-2, 2, 7) ** 2); k /= k.sum()
+        smooth = np.convolve(np.concatenate([rr[-3:], rr, rr[:3]]), k, "valid")   # wraps, like the x period
+        self.rays = 0.45 + 0.55 * (0.6 * smooth / smooth.max() + 0.4 * rr)
         self.rayf = np.random.default_rng(seed + 8).integers(2, 7, self.sw)
         self.rayp = np.random.default_rng(seed + 9).uniform(0, TAU, self.sw)
 
@@ -149,16 +152,18 @@ class Aurora:
             for (m, a, p, s) in c["k"]:
                 yb = yb + a * np.sin(TAU * m * self.xs / W + p + s * ph)
             bright = c["amp"] * (0.55 + 0.45 * np.sin(TAU * self.xs / W * 2 + c["phase"] + ph)) ** 2
-            ray = self.rays * (0.6 + 0.4 * np.sin(self.rayf * ph + self.rayp))
+            ray = self.rays * (0.8 + 0.2 * np.sin(self.rayf * ph + self.rayp))
             hh = c["h"] * (0.8 + 0.2 * np.sin(TAU * self.xs / W * 3 + ph + c["phase"]))
             up = (yb[None, :] - yy) / hh[None, :]          # 0 at the base, 1 at the top
             below = (yy - yb[None, :]) / 10
-            prof = np.where(up >= 0, np.exp(-up * 2.2) * (up < 1.4), np.exp(-below ** 2))
+            edge = np.exp(-(up / 0.08) ** 2) * 0.6                 # the bright lower hem
+            fade = np.clip((1.4 - up) / 0.5, 0, 1)
+            prof = np.where(up >= 0, (np.exp(-up * 2.0) + edge) * fade, np.exp(-below ** 2))
             I = prof * (bright * ray)[None, :]
             green = np.stack([I * 0.15, I * 1.0, I * 0.55], -1)
             top = np.clip(up, 0, 1.4)[..., None] * np.stack([I * 0.55, I * 0.0, I * 0.45], -1) * (up >= 0.45)[..., None]
             out += green + top * 0.8
-        img = Image.fromarray(np.clip(out * 255, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(1.6))
+        img = Image.fromarray(np.clip(out * 255, 0, 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(2.2))
         return np.asarray(img.resize((W, H), Image.BICUBIC)).astype(np.float32)
 
 
@@ -215,8 +220,8 @@ class Sunset:
         self.base = g * np.ones((1, W, 1), np.float32)
         yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
         d = np.hypot(xx - sun_x * W, (yy - yh * H) * 1.4)
-        self.glow = (np.exp(-d / 260)[..., None] * np.array([255, 170, 90]) * 0.55 + np.exp(-d / 60)[..., None] * np.array([255, 230, 170]) * 0.9).astype(np.float32)
-        self.disc = (np.clip(1 - (d - 26) / 3, 0, 1))[..., None].astype(np.float32)
+        self.glow = (np.exp(-d / 260)[..., None] * np.array([255, 170, 90]) * 0.55 + np.exp(-d / 70)[..., None] * np.array([255, 225, 160]) * 1.2).astype(np.float32)
+        self.disc = (np.clip(1 - (d - 30) / 3, 0, 1))[..., None].astype(np.float32)
         rr = np.random.default_rng(seed)
         self.clouds = [dict(x=rr.uniform(0, 1), y=rr.uniform(0.25, 0.85) * yh, w=rr.uniform(0.12, 0.35), h=rr.uniform(0.006, 0.02),
                             m=int(rr.integers(1, 3)), a=rr.uniform(0.35, 0.8)) for _ in range(16)]
@@ -228,7 +233,7 @@ class Sunset:
         sky = self.base.copy()
         breath = 0.85 + 0.15 * math.sin(TAU * t / T)
         sky += self.glow * breath
-        sky = sky * (1 - self.disc) + np.array([255, 236, 200], np.float32) * self.disc
+        sky = sky * (1 - self.disc) + np.array([255, 246, 224], np.float32) * self.disc
         st = np.zeros_like(sky)
         self.stars.draw(st, t, T)
         sky += st * self.top
@@ -252,7 +257,7 @@ class Sunset:
 
 # ---------- the four variants ----------
 
-def make_variant(name, photo, matte, T):
+def make_variant(name, photo, matte, T, shore_share=None):
     """Returns a frame(t) function."""
     photo = photo.convert("RGB")
     matte = matte.convert("L")
@@ -288,7 +293,7 @@ def make_variant(name, photo, matte, T):
         cols = mt > 0.5
         first = np.where(cols.any(0), cols.argmax(0), H)
         yh = float(np.median(first)) / H
-        sunset = Sunset(31, yh, 0.16)
+        sunset = Sunset(31, yh + 0.02, 0.16)
         a = np.asarray(photo).astype(np.float32)
         lum = a.mean(-1, keepdims=True)
         hi = np.clip((lum - 150) / 90, 0, 1)
@@ -302,8 +307,18 @@ def make_variant(name, photo, matte, T):
         below = np.arange(H) > yh * H
         cand = np.where(below & (rows > 0.25))[0]
         shore = int(cand[0]) if len(cand) else int(yh * H)
+        if shore_share is not None:     # the waterline, measured on the photo: the mirror's axis
+            shore = int(shore_share * H)
         refl[:shore] = 0
-        refl = np.asarray(Image.fromarray((refl * 255).astype(np.uint8)).filter(ImageFilter.MinFilter(3)).filter(ImageFilter.GaussianBlur(3))).astype(np.float32) / 255
+        broad = ((hue > 175) & (hue < 255) & (sat > 0.08)).astype(np.float32)
+        broad[:shore] = 0
+        broad = np.asarray(Image.fromarray((broad * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(2))).astype(np.float32) / 255
+        broad_img = Image.fromarray((broad * 255).astype(np.uint8))
+        refl = refl * (sat > 0.3)
+        # drop specks (shadowed rock in the mountain's reflection): keep only broad areas of water
+        sm = np.asarray(Image.fromarray((refl * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(7))).astype(np.float32) / 255
+        refl = refl * (sm > 0.8)
+        refl = np.asarray(Image.fromarray((refl * 255).astype(np.uint8)).filter(ImageFilter.MaxFilter(3)).filter(ImageFilter.GaussianBlur(3))).astype(np.float32) / 255
         refl_img = Image.fromarray((refl * 255).astype(np.uint8))
         if water is None:
             water = (refl * (1 - rect))[..., None]
@@ -355,6 +370,11 @@ def make_variant(name, photo, matte, T):
             s_y = H / 2 + z * (shore - H / 2)
             ys = np.clip((2 * s_y - np.arange(H)).astype(int), 0, H - 1)
             mirrored = sky[ys] * np.array([0.78, 0.74, 0.8], np.float32)
+            # any blue the photo's water still has takes the sunset's colour, at its own brightness
+            bw = np.asarray(warp(broad_img, t, T)).astype(np.float32)[..., None] / 255 * 0.8 * (1 - rect[..., None])
+            lum = land.mean(-1, keepdims=True)
+            tint = lum * mirrored / (mirrored.mean(-1, keepdims=True) + 1)
+            land = land * (1 - bw) + tint * bw
             r = np.asarray(warp(refl_img, t, T)).astype(np.float32)[..., None] / 255 * 0.85
             land = land * (1 - r * (1 - rect[..., None])) + mirrored * r * (1 - rect[..., None])
         else:
@@ -380,11 +400,12 @@ def main():
     ap.add_argument("--photo", required=True)
     ap.add_argument("--matte", required=True)
     ap.add_argument("--seconds", type=int, default=34)
+    ap.add_argument("--shore", type=float, help="dusk: the waterline as a share of the height (the mirror's axis)")
     ap.add_argument("--out", required=True, help="the raw-quality master .mp4 (finish.sh makes the rest)")
     ap.add_argument("--preview", help="write one frame at this loop time (seconds) as a PNG and stop")
     a = ap.parse_args()
     photo = Image.open(a.photo); matte = Image.open(a.matte)
-    fr = make_variant(a.variant, photo, matte, a.seconds)
+    fr = make_variant(a.variant, photo, matte, a.seconds, a.shore)
     if a.preview is not None:
         for i, tt in enumerate(a.preview.split(",")):
             Image.fromarray(fr(float(tt))).save(a.out.replace(".mp4", f"-p{i}.png"))
