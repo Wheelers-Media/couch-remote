@@ -36,7 +36,7 @@ pip install numpy Pillow scipy pymatting
 # 1. the sky cut-out, with couch-tv's own tool, on a 16:9 copy of the photo
 python3 couch-tv/tv-home/tools/make-scene.py photo-169.jpg day --depth --smooth 4 --paint 60 --floor 0.5 --out build/day
 # 2. move the skyline down so the peaks cross the bottom of the clock, carrying the sky up
-python3 scenes/prep.py photo-169.jpg build/day/scene-day-fg.webp --drop 0.25 --out build/day
+python3 scenes/prep.py photo-169.jpg build/day/scene-day-fg.webp --drop 0.19 --out build/day
 # 3. render the loop (about 5 minutes on 4 cores)
 python3 scenes/render.py --variant day --photo build/day.jpg --matte build/day-matte.png --out build/day-master.mp4
 # 4. the Loop look's files, made the way couch-tv's scripts/make-loop.sh makes them

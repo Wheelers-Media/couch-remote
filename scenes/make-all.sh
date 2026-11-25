@@ -44,9 +44,9 @@ python3 "$MS" "$B/night-169.jpg" nightx --depth --step 5 --far 28 --floor 0.6 --
 
 # 3. the skyline moved down so the peaks cross the bottom of the clock's digits
 python3 "$HERE/prep.py" "$B/dawn-169.jpg" "$B/dawn-scene/scene-dawnx-fg.webp" --drop 0.12 --out "$B/dawn"
-python3 "$HERE/prep.py" "$B/day-169.jpg" "$B/day-scene/scene-dayx-fg.webp" --drop 0.25 --out "$B/day"
+python3 "$HERE/prep.py" "$B/day-169.jpg" "$B/day-scene/scene-dayx-fg.webp" --drop 0.19 --out "$B/day"
 python3 "$HERE/prep.py" "$B/dusk-169.jpg" "$B/dusk-scene/scene-duskx-fg.webp" --drop 0.09 --out "$B/dusk"
-python3 "$HERE/prep.py" "$B/night-169.jpg" "$B/night-scene/scene-nightx-fg.webp" --drop 0 --out "$B/night"
+python3 "$HERE/prep.py" "$B/night-169.jpg" "$B/night-scene/scene-nightx-fg.webp" --drop 0.05 --out "$B/night"
 
 # 4. the loops, in parallel (about 5 minutes each on one core)
 for v in dawn day night; do
