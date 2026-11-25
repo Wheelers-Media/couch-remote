@@ -191,12 +191,14 @@ class Birds:
         buf[:] = buf * (1 - a * 0.85) + np.array(color, np.float32) * a * 0.85
 
 
-def water_ripple(frame, water, t, T, strength=2.2):
+def water_ripple(frame, water, t, T, strength=1.3):
     """Small horizontal ripples on the water only (periodic in T)."""
     if water is None:
         return frame
     ys = np.arange(H)
-    sh = (strength * np.sin(ys * 0.9 + TAU * 9 * t / T) + strength * 0.6 * np.sin(ys * 0.37 - TAU * 5 * t / T))
+    # wavelets that grow toward the viewer (lower rows), slow and gentle
+    near = 0.4 + 0.6 * ys / H
+    sh = near * (strength * np.sin(ys * 0.22 + TAU * 6 * t / T) + strength * 0.5 * np.sin(ys * 0.09 - TAU * 3 * t / T))
     xs = (np.arange(W)[None, :] + sh[:, None]).clip(0, W - 1)
     x0 = np.floor(xs).astype(int); fx = (xs - x0)[..., None]; x1 = np.minimum(x0 + 1, W - 1)
     rows = ys[:, None]
@@ -280,7 +282,10 @@ def make_variant(name, photo, matte, T, shore_share=None):
     if night:
         stars = Stars(11, 2600, 0.9, band=(W * 0.08, H * 0.02, W * 0.92, H * 0.62))
         mw = milky_way(5, (W * 0.08, H * 0.02), (W * 0.92, H * 0.62))
-        aur = Aurora(21, H * 0.34, H * 0.30)
+        cols = mt > 0.5
+        first = np.where(cols.any(0), cols.argmax(0), H)
+        yh = float(np.median(first)) / H
+        aur = Aurora(21, H * (yh - 0.03), H * 0.30)
         yy = np.linspace(0, 1, H)[:, None, None]
         sky_base = (np.array([6, 9, 22]) * (1 - yy) + np.array([14, 32, 48]) * yy).astype(np.float32) * np.ones((1, W, 1))
         # land by moonlight: darker, cooler, a little desaturated
