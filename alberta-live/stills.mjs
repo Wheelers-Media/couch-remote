@@ -7,7 +7,7 @@ const b = await chromium.launch();
 await Promise.all(process.argv.slice(2).map(async s => {
   const [name, qs] = s.split('|'), p = await b.newPage({ viewport: { width: 1280, height: 720 } });
   p.on('pageerror', e => console.log(name, 'PAGE ERROR', e.message));
-  await p.goto(`file://${resolve('build/alberta-live.html')}?render=1&${qs}`); await p.waitForFunction(() => window.__ready === true);
+  await p.goto(`file://${resolve('build/alberta-live.html')}?render=1&${qs}`); await p.waitForFunction(() => window.__ready === true, null, { timeout: 30000 });
   const t0 = Date.now();
   const d = await p.evaluate(() => { renderAt(6); return document.getElementById('c').toDataURL('image/jpeg', 0.9); });
   writeFileSync(`build/stills/${name}.jpg`, Buffer.from(d.slice(d.indexOf(',') + 1), 'base64'));

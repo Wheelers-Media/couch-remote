@@ -258,7 +258,7 @@ function drawLive(g, t, S, PL) {
   weather(g, t, S, PAL, wl);
 }
 function moon(g, S, PAL, wl) {
-  const x = W * S.moonX, y = wl - 80 - S.moonAlt * 12, R = 34, vis = (1 - PAL.ov * 0.9) * (0.3 + 0.7 * clamp((-S.sunAlt + 2) / 10));
+  const x = W * S.moonX, y = wl - 70 - Math.min(S.moonAlt, 48) * 12.5, R = 34, vis = (1 - PAL.ov * 0.9) * (0.3 + 0.7 * clamp((-S.sunAlt + 2) / 10));
   if (vis < 0.05) return;
   const gl = g.createRadialGradient(x, y, 0, x, y, R * 6); gl.addColorStop(0, `rgba(220,228,255,${0.25 * vis})`); gl.addColorStop(1, 'rgba(220,228,255,0)'); g.fillStyle = gl; g.fillRect(x - R * 6, y - R * 6, R * 12, R * 12);
   g.save(); g.globalAlpha = vis;
@@ -267,7 +267,7 @@ function moon(g, S, PAL, wl) {
   g.beginPath(); g.arc(x, y, R, -Math.PI / 2, Math.PI / 2, !waxing); g.ellipse(x, y, Math.abs(k) * R, R, 0, Math.PI / 2, -Math.PI / 2, (k > 0) === waxing); g.closePath();
   g.fillStyle = '#f3f2ea'; g.fill();
   // painted craters
-  const r = RNG(91); for (let i = 0; i < 6; i++) dab(g, x + (r() - 0.5) * R, y + (r() - 0.5) * R, R * 0.4, R * 0.18, r() * 3, '#c9c6c0', 0.35, r);
+  for (const [cx, cy, cr] of [[-0.3, -0.2, 0.22], [0.2, 0.15, 0.16], [0.05, -0.38, 0.1], [-0.12, 0.38, 0.12]]) { g.beginPath(); g.arc(x + cx * R, y + cy * R, cr * R, 0, TAU); g.fillStyle = 'rgba(190,188,182,0.35)'; g.fill(); }
   g.restore();
 }
 let AUR = null;
@@ -312,7 +312,17 @@ function weather(g, t, S, PAL, wl) {
 }
 
 // ---------- the page: a still at ?t, or live ----------
-let COND = condFromQuery(), PLATES = null;
+const LIVE_MODE = Q.has('live');
+const liveDate = () => Q.has('date') ? new Date(Q.get('date')) : new Date();
+let COND = LIVE_MODE ? liveConditions(Q.get('loc') || 'moraine', liveDate()) : condFromQuery(), PLATES = null;
+// the key that says the painting must be redone: the sun moved a degree, the weather or the moon changed
+const condKey = c => [Math.round(c.sunAlt), c.sunSide, Math.round(c.moonAlt / 3), Math.round(c.moonX * 20), Math.round(c.moonPhase * 30), Math.round(c.cloud * 10), c.rain, c.snow, c.fog, c.storm, Math.round(c.groundSnow * 4), c.frozen, Math.round(c.aurora * 5), c.season].join(',');
+let LAST_KEY = condKey(COND);
+function refreshLive() {
+  const c = liveConditions(COND.loc, liveDate()), k = condKey(c);
+  COND = c; window.COND = c;
+  if (k !== LAST_KEY) { LAST_KEY = k; PLATES = null; }
+}
 function renderAt(t) {
   const g = CTX; g.setTransform(SC, 0, 0, SC, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
   if (!PLATES) PLATES = (Q.get('style') === 'paint' ? makeScene : makeLayered)(COND);
@@ -322,7 +332,13 @@ function renderAt(t) {
 }
 window.renderAt = renderAt;
 window.setConditions = c => { COND = Object.assign({}, COND, c); PLATES = null; };
-window.__ready = true;
+window.COND = COND;
+if (LIVE_MODE) {
+  // read the weather and the aurora first (up to 6 s), then keep them fresh; recheck the sky every minute
+  const first = Promise.race([Promise.all([readWeather(), readKp()]), new Promise(r => setTimeout(r, 6000))]);
+  first.then(() => { refreshLive(); PLATES = null; window.__ready = true; });
+  setInterval(readWeather, 10 * 60000); setInterval(readKp, 30 * 60000); setInterval(refreshLive, 60000);
+} else window.__ready = true;
 if (!Q.has('render') && !navigator.webdriver) {
   if (Q.has('t')) renderAt(+Q.get('t'));
   else if (REDUCED) renderAt(0);
