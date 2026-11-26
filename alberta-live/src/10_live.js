@@ -124,48 +124,62 @@ function makeScene(S) {
   const yTop = Math.min(...wall.map(p => p[1]));
   const snowLine = lerp(yTop, wl, S.season === 'winter' ? 0.92 : snowFrac * 0.62) + (S.season === 'winter' ? 0 : 0) - S.groundSnow * 60;
   const tree = { dk: land.tree, mid: land.treeMid, lt: land.treeLt, snow: land.snow };
-  plates.land = makePlate(0, 0, W, H, 1, g => {
-    const hazeBack = mixv(land.haze, land.shade, 0.15);
-    alpine(g, back, { rock: mixv(land.rock, hazeBack, 0.6), rockLt: mixv(land.rockLt, hazeBack, 0.55), rockDk: mixv(land.rockDk, hazeBack, 0.6), shade: mixv(land.shade, hazeBack, 0.55), snow: mixv(land.snow, hazeBack, 0.4), snowSh: mixv(land.snowSh, hazeBack, 0.45), haze: hazeBack }, L,
-      { base: wl, snowLine: snowLine + 30, seed: 5, strataN: 30, hazeA: 0.75, hazeH: 200, size: 30 });
-    alpine(g, wall, { rock: land.rock, rockLt: land.rockLt, rockDk: land.rockDk, shade: land.shade, snow: land.snow, snowSh: land.snowSh, haze: mixv(land.haze, land.shade, 0.1) }, L,
-      { base: wl, snowLine, seed: 9, strataN: 120, tilt: loc.tilt ?? -0.1, hazeA: 0.5, hazeH: 160, ink: css(mixv(land.rockDk, '#000000', 0.3)), inkA: 0.35, inkW: 2 });
-    // the side slopes: scree and rock on the left, forest climbing the right
-    const leftR = ridgeLine(loc.left, 31, 30), rightR = ridgeLine(loc.right, 32, 30);
+  // the depth layers (z: distance from the camera's start; nearer layers grow and slide faster as it glides in).
+  // Each is painted wider than the screen (x -120 .. W+120) so the camera's sideways drift never shows an edge.
+  const PW = W + 240, PX = -120, lay = (z, fn) => ({ pl: makePlate(PX, 0, PW, H, 1, fn), z });
+  const hazeBack = mixv(land.haze, land.shade, 0.15);
+  const leftR = ridgeLine(loc.left, 31, 30), rightR = ridgeLine(loc.right, 32, 30);
+  plates.layers = [];
+  plates.layers.push(lay(90, g => alpine(g, back, { rock: mixv(land.rock, hazeBack, 0.6), rockLt: mixv(land.rockLt, hazeBack, 0.55), rockDk: mixv(land.rockDk, hazeBack, 0.6), shade: mixv(land.shade, hazeBack, 0.55), snow: mixv(land.snow, hazeBack, 0.4), snowSh: mixv(land.snowSh, hazeBack, 0.45), haze: hazeBack }, L,
+    { base: wl, snowLine: snowLine + 30, seed: 5, strataN: 30, hazeA: 0.75, hazeH: 200, size: 30 })));
+  plates.layers.push(lay(45, g => alpine(g, wall, { rock: land.rock, rockLt: land.rockLt, rockDk: land.rockDk, shade: land.shade, snow: land.snow, snowSh: land.snowSh, haze: mixv(land.haze, land.shade, 0.1) }, L,
+    { base: wl, snowLine, seed: 9, strataN: 120, tilt: loc.tilt ?? -0.1, hazeA: 0.5, hazeH: 160, ink: css(mixv(land.rockDk, '#000000', 0.3)), inkA: 0.35, inkW: 2 })));
+  plates.layers.push(lay(20, g => {
     alpine(g, leftR, { rock: mixv(land.rock, land.rockDk, 0.2), rockLt: land.rockLt, rockDk: land.rockDk, shade: land.shade, snow: land.snow, snowSh: land.snowSh, haze: land.haze }, L,
       { base: wl + 20, snowLine: S.groundSnow > 0.3 ? 0 : null, seed: 13, strataN: 40, hazeA: 0.25, hazeH: 120, reach: 140, ink: css(land.rockDk), inkA: 0.3 });
-    path(g, [...rightR, [W + 80, H], [rightR[0][0], H]]); g.fillStyle = css(mixv(land.tree, land.haze, 0.15)); g.fill();
-    forestBand(g, rightR[0][0], W + 40, x => lineY(rightR, x) + 6, 110, 16, 46, { dk: mixv(land.tree, land.haze, 0.12), mid: mixv(land.treeMid, land.haze, 0.1), lt: land.treeLt, snow: land.snow }, L, RNG(41), { snow: S.groundSnow, depth: 30 });
-    forestBand(g, rightR[0][0] + 60, W + 40, x => lineY(rightR, x) + 70, 70, 26, 70, tree, L, RNG(42), { snow: S.groundSnow, depth: 60 });
-    // the far shore: a line of small spruces along the water
-    forestBand(g, -40, W + 40, x => wl + 2, 260, 10, 30, { dk: mixv(land.tree, land.haze, 0.25), mid: mixv(land.treeMid, land.haze, 0.2), lt: land.treeLt, snow: land.snow }, L, RNG(43), { snow: S.groundSnow, depth: 4 });
-    forestBand(g, -40, leftR[leftR.length - 1][0], x => Math.min(lineY(leftR, x) + 30, wl + 6), 40, 20, 60, tree, L, RNG(44), { snow: S.groundSnow, depth: 30 });
-  });
-  // the lake: a mirror of sky and land
-  const above = mk(W, H), ag = above.getContext('2d'); ag.drawImage(plates.sky.c, 0, 0); ag.drawImage(plates.land.c, 0, 0);
-  plates.lake = makePlate(0, 0, W, H, 1, g => lakePlate(g, above, wl, land, RNG(51), { frozen: S.frozen }));
-  // near: the framing spruces, rocks and grass at the shore, the cabin
-  plates.near = makePlate(0, 0, W, H, 1, g => {
-    const nearTree = { dk: mixv(land.tree, '#000000', 0.25), mid: land.tree, lt: land.treeMid, snow: land.snow };
+    path(g, [...rightR, [W + 120, H], [rightR[0][0], H]]); g.fillStyle = css(mixv(land.tree, land.haze, 0.15)); g.fill();
+    forestBand(g, rightR[0][0], W + 100, x => lineY(rightR, x) + 6, 120, 16, 46, { dk: mixv(land.tree, land.haze, 0.12), mid: mixv(land.treeMid, land.haze, 0.1), lt: land.treeLt, snow: land.snow }, L, RNG(41), { snow: S.groundSnow, depth: 30 });
+    forestBand(g, rightR[0][0] + 60, W + 100, x => lineY(rightR, x) + 70, 80, 26, 70, tree, L, RNG(42), { snow: S.groundSnow, depth: 60 });
+    forestBand(g, -100, W + 100, x => wl + 2, 290, 10, 30, { dk: mixv(land.tree, land.haze, 0.25), mid: mixv(land.treeMid, land.haze, 0.2), lt: land.treeLt, snow: land.snow }, L, RNG(43), { snow: S.groundSnow, depth: 4 });
+    forestBand(g, -100, leftR[leftR.length - 1][0], x => Math.min(lineY(leftR, x) + 30, wl + 6), 44, 20, 60, tree, L, RNG(44), { snow: S.groundSnow, depth: 30 });
+  }));
+  // the lake: a mirror of sky and land as they stand at the start
+  const above = mk(PW, H), ag = above.getContext('2d'); ag.drawImage(plates.sky.c, -PX, 0); for (const l of plates.layers) ag.drawImage(l.pl.c, 0, 0);
+  const lakeImg = mk(W, H); lakeImg.getContext('2d').drawImage(above, PX, 0);
+  plates.lakeZ = 14;
+  plates.lake = makePlate(PX, 0, PW, H, 1, g => { g.save(); g.translate(-PX, 0); g.restore(); lakePlate(g, lakeImg, wl, land, RNG(51), { frozen: S.frozen }); });
+  const nearTree = { dk: mixv(land.tree, '#000000', 0.25), mid: land.tree, lt: land.treeMid, snow: land.snow };
+  const bankCol = S.groundSnow > 0.3 ? mixv(land.snow, land.shade, 0.25) : mixv(mixv(land.grass, land.tree, 0.4), land.shade, PAL.dark * 0.5);
+  // the near ground: banks, boulders, the cabin on its point
+  plates.groundZ = 7;
+  plates.ground = makePlate(PX, 0, PW, H, 1, g => {
     const r2 = RNG(61);
-    // banks in the corners
-    const bankCol = S.groundSnow > 0.3 ? mixv(land.snow, land.shade, 0.25) : mixv(land.grass, land.tree, 0.4);
-    paintRegion(g, [[-20, H + 20], [-20, 900], [160, 880], [340, 930], [520, 1010], [620, H + 20]], bankCol, r2, { size: 22, dens: 1.2, a: 0.35, colAt: (x, y, rr) => jit(rr() < 0.5 ? bankCol : mixv(bankCol, land.rockDk, 0.3), rr, 12) });
-    paintRegion(g, [[W + 20, H + 20], [W + 20, 880], [1760, 870], [1560, 930], [1380, 1010], [1280, H + 20]], bankCol, r2, { size: 22, dens: 1.2, a: 0.35, colAt: (x, y, rr) => jit(rr() < 0.5 ? bankCol : mixv(bankCol, land.rockDk, 0.3), rr, 12) });
-    // boulders at the water's edge
+    paintRegion(g, [[-120, H + 20], [-120, 890], [160, 880], [340, 930], [520, 1010], [620, H + 20]], bankCol, r2, { size: 22, dens: 1.2, a: 0.35, colAt: (x, y, rr) => jit(rr() < 0.5 ? bankCol : mixv(bankCol, land.rockDk, 0.3), rr, 12) });
+    paintRegion(g, [[W + 120, H + 20], [W + 120, 870], [1760, 870], [1560, 930], [1380, 1010], [1280, H + 20]], bankCol, r2, { size: 22, dens: 1.2, a: 0.35, colAt: (x, y, rr) => jit(rr() < 0.5 ? bankCol : mixv(bankCol, land.rockDk, 0.3), rr, 12) });
     for (const [bx, by, bs] of [[420, 1000, 44], [520, 1040, 30], [1430, 1000, 50], [1330, 1045, 28], [300, 960, 34]]) {
       const pts = rough(scallop(bx, by, bs, bx, 5, 0.55).filter(p => p[1] <= by + bs * 0.2), 2, bx, 6);
       cels(g, pts, { base: mixv(land.rock, land.rockDk, 0.3), sh: land.shade, sw: bs * 0.3, rim: land.rockLt, rw: 3, L, line: P.ink, lw: 2, seed: bx });
     }
-    if (loc.cabin) {   // the cabin's clearing: a grassy (or snowy) point running out into the lake
+    if (loc.cabin) {
       const [cx, cy] = loc.cabin;
-      const clearing = [[cx - 360, cy + 12], [cx - 200, cy - 6], [cx + 40, cy - 14], [cx + 300, cy - 18], [W + 20, cy - 30], [W + 20, H + 20], [cx - 80, H + 20], [cx - 260, cy + 110]];
+      const clearing = [[cx - 360, cy + 12], [cx - 200, cy - 6], [cx + 40, cy - 14], [cx + 300, cy - 18], [W + 120, cy - 30], [W + 120, H + 20], [cx - 80, H + 20], [cx - 260, cy + 110]];
       paintRegion(g, rough(clearing, 6, 5, 10), bankCol, r2, { size: 20, dens: 1.3, a: 0.35, colAt: (x, y, rr) => jit(rr() < 0.5 ? bankCol : mixv(bankCol, land.treeLt, 0.35), rr, 12) });
-      forestBand(g, cx + 90, W + 20, x => cy - 22 + (x - cx) * -0.02, 18, 60, 160, nearTree, L, RNG(66), { snow: S.groundSnow, depth: 10 });
+      forestBand(g, cx + 90, W + 100, x => cy - 22 + (x - cx) * -0.02, 20, 60, 160, nearTree, L, RNG(66), { snow: S.groundSnow, depth: 10 });
+      plates.chimney = cabin(g, cx, cy, loc.cabin[2] * 40, land, L, { glow: clamp((2 - S.sunAlt) / 6), snow: S.groundSnow });
     }
-    if (loc.cabin) plates.chimney = cabin(g, loc.cabin[0], loc.cabin[1], loc.cabin[2] * 40, land, L, { glow: clamp((2 - S.sunAlt) / 6), snow: S.groundSnow });
+    paperOver(g, PW, H, 0.28);
+  });
+  // the framing pines, and two right by the lens that the camera glides past
+  plates.treesZ = 3.2;
+  plates.trees = makePlate(PX, 0, PW, H, 1, g => {
     for (const [x, y, h, lean] of loc.heroes) spruce(g, x, y, h, nearTree, L, RNG(Math.floor(x * 3 + h)), { snow: S.groundSnow, lean, ink: css(P.inkCool) });
-    paperOver(g, W, H, 0.28);
+    paperOver(g, PW, H, 0.28);
+  });
+  plates.passZ = 1.7;
+  plates.pass = makePlate(PX, 0, PW, H, 1, g => {
+    const dk = { dk: mixv(nearTree.dk, '#000000', 0.35), mid: nearTree.dk, lt: nearTree.mid, snow: land.snow };
+    spruce(g, 330, 1130, 900, dk, L, RNG(901), { snow: S.groundSnow, ink: css(P.inkCool) });
+    spruce(g, 1560, 1150, 980, dk, L, RNG(902), { snow: S.groundSnow, ink: css(P.inkCool) });
   });
   // clouds: lit cumulus in the sky's light, as many as the cover says
   plates.clouds = [];
@@ -181,6 +195,16 @@ function makeScene(S) {
     plates.clouds.push({ pl, x: cr() * (W + 800) - 400, y: 90 + cr() * (wl * 0.42), speed: 0.5 + cr() * 0.8, w });
   }
   return plates;
+}
+
+// ---------- the camera ----------
+// One continuous glide forward through the layers over each location's turn (fast at first, then slower for longer,
+// never reversing), with a slow sideways drift. ?push=0..1.4 overrides how far it gets (for stills).
+const SHOT = qn('shot', 90), SPEED = qn('speed', 1);
+function camAt(t) {
+  const u = clamp(((t * SPEED) % SHOT) / SHOT), ease = 1 - Math.pow(1 - u, 2.2);
+  const z = Q.has('push') ? qn('push', 0) : 1.25 * ease;
+  return { z, x: Q.has('push') ? qn('drift', 0) : lerp(-1, 1, sstep(u)) * 0.9 };
 }
 
 // ---------- what moves ----------
@@ -203,22 +227,30 @@ function drawLive(g, t, S, PL) {
     const span = W + c.w * 2, x = ((c.x + S.windDir * t * (4 + S.wind * 0.8) * c.speed) % span + span) % span - c.w;
     g.globalAlpha = 0.95; plateDraw(g, { ...c.pl, ox: c.pl.ox + x, oy: c.pl.oy + c.y }); g.globalAlpha = 1;
   }
+  if (PL.wisps) { const span = 240, dx = ((S.windDir * t * (2 + S.wind * 0.35)) % span + span) % span - span / 2; plateDraw(g, { ...PL.wisps, ox: PL.wisps.ox + dx }); }
   if (PL.ceiling) { g.globalAlpha = 0.8; plateDraw(g, { ...PL.ceiling, ox: ((S.windDir * t * (3 + S.wind * 0.4)) % 300) - 150 }); g.globalAlpha = 1; }
   if (PAL.ov > 0.25) { const og = g.createLinearGradient(0, 0, 0, wl); og.addColorStop(0, css(mixv(PAL.sky.top, [150, 155, 165], 0.5), PAL.ov * 0.6)); og.addColorStop(1, css(PAL.sky.hor, 0)); g.fillStyle = og; g.fillRect(0, 0, W, wl); }
-  plateDraw(g, PL.land);
-  plateDraw(g, PL.lake);
+  const C = camAt(t), vx = W / 2, vy = wl;
+  // a plate at depth z: scaled about the horizon's vanishing point and shifted by the camera's sideways drift
+  const at = (z) => { const k = z / Math.max(0.05, z - C.z); return [k, -C.x * 40 / Math.max(0.05, z - C.z)]; };
+  const layer = (pl, z, a = 1) => { const [k, dx] = at(z); g.save(); g.translate(vx + dx, vy); g.scale(k, k); g.translate(-vx, -vy); g.globalAlpha = a; plateDraw(g, pl); g.restore(); };
+  const proj = (x, y, z) => { const [k, dx] = at(z); return [vx + dx + (x - vx) * k, vy + (y - vy) * k, k]; };
+  for (const l of PL.layers) layer(l.pl, l.z);
+  layer(PL.lake, PL.lakeZ);
   // glints on the water under the moon or a low sun
   if (!S.frozen) {
     const sunLow = S.sunAlt > -1 && S.sunAlt < 20, gx = sunLow ? W * (0.5 + 0.42 * S.sunSide) : W * S.moonX;
     const ga = (sunLow ? clamp(1 - S.sunAlt / 20) : S.moonAlt > 0 ? clamp(S.moonPhase < 0.5 ? S.moonPhase * 2 : (1 - S.moonPhase) * 2) * night : 0) * (1 - PAL.ov);
     if (ga > 0.05) for (let k = 0; k < 34; k++) {
-      const u = k / 34, y = wl + 6 + Math.pow(u, 1.4) * (H - wl - 10), w = 10 + u * 70, x = gx + Math.sin(t * 0.8 + k * 1.7) * w * 0.4 + (hash(k, 9) - 0.5) * w;
+      const u = k / 34, [, , kk] = proj(0, 0, PL.lakeZ), y = wl + (6 + Math.pow(u, 1.4) * (H - wl - 10)) * kk, w = (10 + u * 70) * kk, x = proj(gx, 0, PL.lakeZ)[0] + Math.sin(t * 0.8 + k * 1.7) * w * 0.4 + (hash(k, 9) - 0.5) * w;
       g.fillStyle = css(sunLow ? mixv(PAL.sky.glow, '#ffffff', 0.4) : [232, 236, 255], ga * (0.25 + 0.6 * (0.5 + 0.5 * Math.sin(t * 2 + k * 2.3))));
       g.fillRect(x - w / 2, y, w, 1.5 + u * 2);
     }
   }
-  plateDraw(g, PL.near);
-  if (PL.chimney && (S.temp < 16 || night > 0.3)) smoke(g, t, PL.chimney, S, PAL);
+  layer(PL.ground, PL.groundZ);
+  if (PL.chimney && (S.temp < 16 || night > 0.3)) { const [cx, cy, ck] = proj(PL.chimney[0], PL.chimney[1], PL.groundZ); smoke(g, t, [cx, cy], S, PAL, ck); }
+  layer(PL.trees, PL.treesZ);
+  layer(PL.pass, PL.passZ);
   weather(g, t, S, PAL, wl);
 }
 function moon(g, S, PAL, wl) {
@@ -248,10 +280,10 @@ function aurora(g, t, a, wl) {
   }
   g.save(); g.globalCompositeOperation = 'screen'; g.imageSmoothingQuality = 'high'; g.drawImage(AUR, 0, 0, W, wl * 1.25 * (ah / ah)); g.restore();
 }
-function smoke(g, t, ch, S, PAL) {
+function smoke(g, t, ch, S, PAL, k = 1) {
   const col = mixv(mixv(PAL.sky.hor, '#e8e8ec', 0.5), '#3a3e50', PAL.dark * 0.6);
   for (let i = 0; i < 26; i++) {
-    const age = ((t * 0.45 + i / 26) % 1), x = ch[0] + S.windDir * age * age * (40 + S.wind * 6) + 6 * n1(t * 0.6 + i, 4), y = ch[1] - age * 160, rr = 6 + age * 34;
+    const age = ((t * 0.45 + i / 26) % 1), x = ch[0] + (S.windDir * age * age * (40 + S.wind * 6) + 6 * n1(t * 0.6 + i, 4)) * k, y = ch[1] - age * 160 * k, rr = (6 + age * 34) * k;
     g.fillStyle = css(col, 0.35 * (1 - age)); g.beginPath(); g.arc(x, y, rr, 0, TAU); g.fill();
   }
 }
@@ -278,7 +310,7 @@ function weather(g, t, S, PAL, wl) {
 let COND = condFromQuery(), PLATES = null;
 function renderAt(t) {
   const g = CTX; g.setTransform(SC, 0, 0, SC, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
-  if (!PLATES) PLATES = makeScene(COND);
+  if (!PLATES) PLATES = (Q.get('style') === 'paint' ? makeScene : makeLayered)(COND);
   drawLive(g, t, COND, PLATES);
   g.save(); g.globalCompositeOperation = 'overlay'; g.globalAlpha = 0.14; g.fillStyle = g.createPattern(tooth(), 'repeat'); g.fillRect(0, 0, W, H); g.restore();
   const v = g.createRadialGradient(W / 2, H / 2, H * 0.45, W / 2, H / 2, H * 1.1); v.addColorStop(0, 'rgba(6,10,14,0)'); v.addColorStop(1, 'rgba(6,10,14,0.28)'); g.fillStyle = v; g.fillRect(0, 0, W, H);
