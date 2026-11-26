@@ -216,7 +216,8 @@ function drawLive(g, t, S, PL) {
   if (night * clear > 0.02) {
     const a = night * clear;
     for (let i = 0; i < 380; i++) {
-      const x = hash(i, 1) * W, y = Math.pow(hash(i, 2), 1.5) * wl * 0.9, tw = 0.55 + 0.45 * Math.sin(t * (0.6 + hash(i, 3) * 2) + i);
+      const ST = MOTION_TOKENS.stars, every = lerp(ST.dipEvery[0], ST.dipEvery[1], seeded(i, 5)), ph = loopP(t, every, seeded(i, 6)), dip = bell(clamp((ph * every) / ST.dipLen));
+      const x = hash(i, 1) * W, y = Math.pow(hash(i, 2), 1.5) * wl * 0.9, tw = 1 - ST.dipDepth * dip;
       g.fillStyle = `rgba(240,242,255,${(a * tw * (0.3 + 0.7 * hash(i, 4))).toFixed(3)})`; const s = hash(i, 5) < 0.06 ? 2.4 : 1.4; g.fillRect(x, y, s, s);
     }
   }
@@ -249,8 +250,11 @@ function drawLive(g, t, S, PL) {
   }
   layer(PL.ground, PL.groundZ);
   if (PL.chimney && (S.temp < 16 || night > 0.3)) { const [cx, cy, ck] = proj(PL.chimney[0], PL.chimney[1], PL.groundZ); smoke(g, t, [cx, cy], S, PAL, ck); }
-  layer(PL.trees, PL.treesZ);
-  layer(PL.pass, PL.passZ);
+  // the cabin's window glow breathes a little
+  if (PL.cabinAt && S.sunAlt < 2) { const [cx, cy, ck] = proj(PL.cabinAt[0], PL.cabinAt[1], PL.groundZ), G = MOTION_TOKENS.glow, on = clamp((2 - S.sunAlt) / 6);
+    const R = 120 * ck * (1 + G.amount * wave(t, G.period)), gl = g.createRadialGradient(cx, cy, 0, cx, cy, R); gl.addColorStop(0, `rgba(255,190,110,${0.18 * on})`); gl.addColorStop(1, 'rgba(255,190,110,0)'); g.fillStyle = gl; g.fillRect(cx - R, cy - R, R * 2, R * 2); }
+  if (PL.sway) PL.sway.forEach((tr, i) => { const [px, py, k] = proj(tr.x, tr.y, tr.z); drawSwayTree(g, tr.spr, px, py, k, t, i, S); });
+  else { layer(PL.trees, PL.treesZ); layer(PL.pass, PL.passZ); }
   weather(g, t, S, PAL, wl);
 }
 function moon(g, S, PAL, wl) {
@@ -281,10 +285,11 @@ function aurora(g, t, a, wl) {
   g.save(); g.globalCompositeOperation = 'screen'; g.imageSmoothingQuality = 'high'; g.drawImage(AUR, 0, 0, W, wl * 1.25 * (ah / ah)); g.restore();
 }
 function smoke(g, t, ch, S, PAL, k = 1) {
-  const col = mixv(mixv(PAL.sky.hor, '#e8e8ec', 0.5), '#3a3e50', PAL.dark * 0.6);
-  for (let i = 0; i < 26; i++) {
-    const age = ((t * 0.45 + i / 26) % 1), x = ch[0] + (S.windDir * age * age * (40 + S.wind * 6) + 6 * n1(t * 0.6 + i, 4)) * k, y = ch[1] - age * 160 * k, rr = (6 + age * 34) * k;
-    g.fillStyle = css(col, 0.35 * (1 - age)); g.beginPath(); g.arc(x, y, rr, 0, TAU); g.fill();
+  const M = MOTION_TOKENS.smoke, col = mixv(mixv(PAL.sky.hor, '#e8e8ec', 0.5), '#3a3e50', PAL.dark * 0.6);
+  for (let i = 0; i < M.puffs; i++) {
+    const p = loopP(t, M.period * (0.9 + 0.2 * seeded(i, 3)), i / M.puffs), lean = S.windDir * p * p * (30 + S.wind * 5) * M.lean;
+    const x = ch[0] + (lean + 7 * wave(t, 5200, seeded(i, 4)) * p) * k, y = ch[1] - p * M.rise * k, rr = (6 + p * 32) * k;
+    g.fillStyle = css(col, 0.32 * bell(p)); g.beginPath(); g.arc(x, y, rr, 0, TAU); g.fill();
   }
 }
 function weather(g, t, S, PAL, wl) {
@@ -320,5 +325,8 @@ window.setConditions = c => { COND = Object.assign({}, COND, c); PLATES = null; 
 window.__ready = true;
 if (!Q.has('render') && !navigator.webdriver) {
   if (Q.has('t')) renderAt(+Q.get('t'));
-  else { const t0 = performance.now(); (function loop() { renderAt((performance.now() - t0) / 1000); requestAnimationFrame(loop); })(); }
+  else if (REDUCED) renderAt(0);
+  else { let t0 = performance.now(), hiddenAt = 0;
+    document.addEventListener('visibilitychange', () => { if (document.hidden) hiddenAt = performance.now(); else if (hiddenAt) t0 += performance.now() - hiddenAt; });
+    (function loop() { if (!document.hidden) renderAt((performance.now() - t0) / 1000); requestAnimationFrame(loop); })(); }
 }

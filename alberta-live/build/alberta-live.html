@@ -698,7 +698,7 @@ function spruceSil(g, x, y, h, col, r, lean = 0) {
   const L = [], R = [];
   for (let k = 0; k < tiers; k++) {
     const t = (k + 1) / tiers, ty = y - h + t * h * 0.92, cx = x + lean * h * (1 - t), w = h * (0.05 + 0.2 * Math.pow(t, 0.9)) * (0.8 + 0.4 * r());
-    const up = h * 0.055;
+    const up = h * 0.055 * Math.min(1, t * 2.2);   // the branch tips flick up less near the top, so none rise above the apex
     L.push([cx - w * 0.45, ty - up], [cx - w, ty + h * 0.012 * (1 + r())]);
     R.push([cx + w * 0.45, ty - up], [cx + w, ty + h * 0.012 * (1 + r())]);
   }
@@ -884,16 +884,52 @@ function makeLayered(S) {
     }
     if (S.groundSnow > 0.3) { g.globalAlpha = 0.5 * S.groundSnow; g.fillStyle = css(mixv(C.snow, C.near, 0.5)); path(g, [[PX, H], [PX, 900], [140, 892], [330, 940], [520, 1020], [600, H]]); g.fill(); g.globalAlpha = 1; }
   });
-  // the framing spruces, and two right by the lens
-  PL.treesZ = 3.2;
-  PL.trees = makePlate(PX, 0, PW, H, 1, g => {
-    const r = RNG(77);
-    for (const [x, y, h] of [[60, 1000, 820], [190, 1012, 620], [-30, 1040, 700], [300, 1020, 420], [1780, 990, 820], [1900, 1030, 900], [1650, 1000, 520], [1560, 1030, 360]]) spruceSil(g, x, y, h, nearCol, r, (r() - 0.5) * 0.02);
-    if (S.groundSnow > 0.3) { /* a dusting on the near trees reads as pale tips */ }
-  });
-  PL.passZ = 1.7;
-  PL.pass = makePlate(PX, 0, PW, H, 1, g => { const r = RNG(88), c = css(mixv(col(N - 1), [0, 0, 0], 0.3)); spruceSil(g, 150, 1150, 940, c, r); spruceSil(g, 1760, 1160, 1000, c, r); });
+  // the framing spruces, and two right by the lens: separate sprites, so each can sway in the wind
+  const sprite = (h, c, seed) => { const w = Math.ceil(h * 0.6), pad = Math.ceil(h * 0.06), cv = mk(w, h + pad + 6), g = cv.getContext('2d'); spruceSil(g, w / 2, h + pad + 2, h, c, RNG(seed)); return cv; };
+  PL.sway = [];
+  const nearC = nearCol, passC = css(mixv(col(N - 1), [0, 0, 0], 0.3));
+  [[60, 1000, 820], [190, 1012, 620], [-30, 1040, 700], [300, 1020, 420], [1780, 990, 820], [1900, 1030, 900], [1650, 1000, 520], [1560, 1030, 360]]
+    .forEach(([x, y, h], i) => PL.sway.push({ spr: sprite(h, nearC, 300 + i), x, y: y + 4, z: 3.2 }));
+  PL.sway.push({ spr: sprite(940, passC, 401), x: 150, y: 1154, z: 1.7 }, { spr: sprite(1000, passC, 402), x: 1760, y: 1164, z: 1.7 });
+  if (LO.cabin) PL.cabinAt = [LO.cabin[0], LO.cabin[1] - 18 * LO.cabin[2]];
   return PL;
+}
+
+// ===== 07_motion.js
+// ---------- motion: one clock for the whole scene, and every number in one place ----------
+// After rossark-motion-skill: smooth waves with seeded phases (never Math.random per frame, never all in sync),
+// small amplitudes, tips that trail their base, opacity only to appear or disappear. See MOTION.md.
+const MOTION_TOKENS = {
+  sway: { minDeg: 0.6, maxDeg: 3.2, kmhForMax: 50, period: [3800, 6200], tipDelay: 0.14, tipGain: 0.55, gustPeriod: 23000 },
+  smoke: { period: 9000, puffs: 22, rise: 170, lean: 0.9 },
+  stars: { dipEvery: [3000, 9000], dipLen: 700, dipDepth: 0.65 },
+  glow: { period: 3400, amount: 0.04 },
+};
+const wave = (t, period, phase = 0) => Math.sin(TAU * (t * 1000 / period + phase));
+const loopP = (t, period, phase = 0) => ((t * 1000 / period + phase) % 1 + 1) % 1;
+const bell = p => Math.sin(Math.PI * clamp(p));
+const seeded = (i, k = 0) => hash(i * 7 + 13, k + 101);
+const REDUCED = typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+// the sway angle (radians) of tree i at time t: the real wind sets the size, a slow gust breathes it,
+// each tree has its own period and phase; the bias leans the trees downwind
+function swayAt(t, i, S) {
+  const T = MOTION_TOKENS.sway, w = clamp(S.wind / T.kmhForMax), deg = lerp(T.minDeg, T.maxDeg, w);
+  const gust = 0.75 + 0.25 * wave(t, T.gustPeriod, seeded(i, 9) * 0.2);
+  const per = lerp(T.period[0], T.period[1], seeded(i, 1));
+  return (deg * gust * wave(t, per, seeded(i, 2)) + deg * 0.35 * w * S.windDir) * Math.PI / 180;
+}
+// a tree sprite drawn bending: the lower part leans by the sway, the upper part follows a beat later and further
+function drawSwayTree(g, spr, x, y, k, t, i, S) {
+  const T = MOTION_TOKENS.sway, a = swayAt(t, i, S), aLate = swayAt(t - T.tipDelay, i, S);
+  const h = spr.height, w = spr.width, cut = Math.round(h * 0.45), lower = h - cut;
+  const bend = a + T.tipGain * (aLate - a) + 0.35 * a;   // the tip moves later and further than the base
+  g.save(); g.translate(x, y); g.scale(k, k);
+  // lower part: sheared about the base
+  g.save(); g.transform(1, 0, -Math.tan(a), 1, 0, 0); g.drawImage(spr, 0, cut - 2, w, lower + 2, -w / 2, -lower - 2, w, lower + 2); g.restore();
+  // upper part: carried by the lower part's lean, then bending on its own (overlapping by 2 px so no seam shows)
+  const top = -lower;
+  g.save(); g.translate(-Math.tan(a) * top, top); g.transform(1, 0, -Math.tan(bend), 1, 0, 0); g.drawImage(spr, 0, 0, w, cut + 2, -w / 2, -cut, w, cut + 2); g.restore();
+  g.restore();
 }
 
 // ===== 10_live.js
@@ -1115,7 +1151,8 @@ function drawLive(g, t, S, PL) {
   if (night * clear > 0.02) {
     const a = night * clear;
     for (let i = 0; i < 380; i++) {
-      const x = hash(i, 1) * W, y = Math.pow(hash(i, 2), 1.5) * wl * 0.9, tw = 0.55 + 0.45 * Math.sin(t * (0.6 + hash(i, 3) * 2) + i);
+      const ST = MOTION_TOKENS.stars, every = lerp(ST.dipEvery[0], ST.dipEvery[1], seeded(i, 5)), ph = loopP(t, every, seeded(i, 6)), dip = bell(clamp((ph * every) / ST.dipLen));
+      const x = hash(i, 1) * W, y = Math.pow(hash(i, 2), 1.5) * wl * 0.9, tw = 1 - ST.dipDepth * dip;
       g.fillStyle = `rgba(240,242,255,${(a * tw * (0.3 + 0.7 * hash(i, 4))).toFixed(3)})`; const s = hash(i, 5) < 0.06 ? 2.4 : 1.4; g.fillRect(x, y, s, s);
     }
   }
@@ -1148,8 +1185,11 @@ function drawLive(g, t, S, PL) {
   }
   layer(PL.ground, PL.groundZ);
   if (PL.chimney && (S.temp < 16 || night > 0.3)) { const [cx, cy, ck] = proj(PL.chimney[0], PL.chimney[1], PL.groundZ); smoke(g, t, [cx, cy], S, PAL, ck); }
-  layer(PL.trees, PL.treesZ);
-  layer(PL.pass, PL.passZ);
+  // the cabin's window glow breathes a little
+  if (PL.cabinAt && S.sunAlt < 2) { const [cx, cy, ck] = proj(PL.cabinAt[0], PL.cabinAt[1], PL.groundZ), G = MOTION_TOKENS.glow, on = clamp((2 - S.sunAlt) / 6);
+    const R = 120 * ck * (1 + G.amount * wave(t, G.period)), gl = g.createRadialGradient(cx, cy, 0, cx, cy, R); gl.addColorStop(0, `rgba(255,190,110,${0.18 * on})`); gl.addColorStop(1, 'rgba(255,190,110,0)'); g.fillStyle = gl; g.fillRect(cx - R, cy - R, R * 2, R * 2); }
+  if (PL.sway) PL.sway.forEach((tr, i) => { const [px, py, k] = proj(tr.x, tr.y, tr.z); drawSwayTree(g, tr.spr, px, py, k, t, i, S); });
+  else { layer(PL.trees, PL.treesZ); layer(PL.pass, PL.passZ); }
   weather(g, t, S, PAL, wl);
 }
 function moon(g, S, PAL, wl) {
@@ -1180,10 +1220,11 @@ function aurora(g, t, a, wl) {
   g.save(); g.globalCompositeOperation = 'screen'; g.imageSmoothingQuality = 'high'; g.drawImage(AUR, 0, 0, W, wl * 1.25 * (ah / ah)); g.restore();
 }
 function smoke(g, t, ch, S, PAL, k = 1) {
-  const col = mixv(mixv(PAL.sky.hor, '#e8e8ec', 0.5), '#3a3e50', PAL.dark * 0.6);
-  for (let i = 0; i < 26; i++) {
-    const age = ((t * 0.45 + i / 26) % 1), x = ch[0] + (S.windDir * age * age * (40 + S.wind * 6) + 6 * n1(t * 0.6 + i, 4)) * k, y = ch[1] - age * 160 * k, rr = (6 + age * 34) * k;
-    g.fillStyle = css(col, 0.35 * (1 - age)); g.beginPath(); g.arc(x, y, rr, 0, TAU); g.fill();
+  const M = MOTION_TOKENS.smoke, col = mixv(mixv(PAL.sky.hor, '#e8e8ec', 0.5), '#3a3e50', PAL.dark * 0.6);
+  for (let i = 0; i < M.puffs; i++) {
+    const p = loopP(t, M.period * (0.9 + 0.2 * seeded(i, 3)), i / M.puffs), lean = S.windDir * p * p * (30 + S.wind * 5) * M.lean;
+    const x = ch[0] + (lean + 7 * wave(t, 5200, seeded(i, 4)) * p) * k, y = ch[1] - p * M.rise * k, rr = (6 + p * 32) * k;
+    g.fillStyle = css(col, 0.32 * bell(p)); g.beginPath(); g.arc(x, y, rr, 0, TAU); g.fill();
   }
 }
 function weather(g, t, S, PAL, wl) {
@@ -1219,6 +1260,9 @@ window.setConditions = c => { COND = Object.assign({}, COND, c); PLATES = null; 
 window.__ready = true;
 if (!Q.has('render') && !navigator.webdriver) {
   if (Q.has('t')) renderAt(+Q.get('t'));
-  else { const t0 = performance.now(); (function loop() { renderAt((performance.now() - t0) / 1000); requestAnimationFrame(loop); })(); }
+  else if (REDUCED) renderAt(0);
+  else { let t0 = performance.now(), hiddenAt = 0;
+    document.addEventListener('visibilitychange', () => { if (document.hidden) hiddenAt = performance.now(); else if (hiddenAt) t0 += performance.now() - hiddenAt; });
+    (function loop() { if (!document.hidden) renderAt((performance.now() - t0) / 1000); requestAnimationFrame(loop); })(); }
 }
 </script></body></html>

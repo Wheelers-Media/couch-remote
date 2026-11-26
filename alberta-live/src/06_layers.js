@@ -9,7 +9,7 @@ function spruceSil(g, x, y, h, col, r, lean = 0) {
   const L = [], R = [];
   for (let k = 0; k < tiers; k++) {
     const t = (k + 1) / tiers, ty = y - h + t * h * 0.92, cx = x + lean * h * (1 - t), w = h * (0.05 + 0.2 * Math.pow(t, 0.9)) * (0.8 + 0.4 * r());
-    const up = h * 0.055;
+    const up = h * 0.055 * Math.min(1, t * 2.2);   // the branch tips flick up less near the top, so none rise above the apex
     L.push([cx - w * 0.45, ty - up], [cx - w, ty + h * 0.012 * (1 + r())]);
     R.push([cx + w * 0.45, ty - up], [cx + w, ty + h * 0.012 * (1 + r())]);
   }
@@ -195,14 +195,13 @@ function makeLayered(S) {
     }
     if (S.groundSnow > 0.3) { g.globalAlpha = 0.5 * S.groundSnow; g.fillStyle = css(mixv(C.snow, C.near, 0.5)); path(g, [[PX, H], [PX, 900], [140, 892], [330, 940], [520, 1020], [600, H]]); g.fill(); g.globalAlpha = 1; }
   });
-  // the framing spruces, and two right by the lens
-  PL.treesZ = 3.2;
-  PL.trees = makePlate(PX, 0, PW, H, 1, g => {
-    const r = RNG(77);
-    for (const [x, y, h] of [[60, 1000, 820], [190, 1012, 620], [-30, 1040, 700], [300, 1020, 420], [1780, 990, 820], [1900, 1030, 900], [1650, 1000, 520], [1560, 1030, 360]]) spruceSil(g, x, y, h, nearCol, r, (r() - 0.5) * 0.02);
-    if (S.groundSnow > 0.3) { /* a dusting on the near trees reads as pale tips */ }
-  });
-  PL.passZ = 1.7;
-  PL.pass = makePlate(PX, 0, PW, H, 1, g => { const r = RNG(88), c = css(mixv(col(N - 1), [0, 0, 0], 0.3)); spruceSil(g, 150, 1150, 940, c, r); spruceSil(g, 1760, 1160, 1000, c, r); });
+  // the framing spruces, and two right by the lens: separate sprites, so each can sway in the wind
+  const sprite = (h, c, seed) => { const w = Math.ceil(h * 0.6), pad = Math.ceil(h * 0.06), cv = mk(w, h + pad + 6), g = cv.getContext('2d'); spruceSil(g, w / 2, h + pad + 2, h, c, RNG(seed)); return cv; };
+  PL.sway = [];
+  const nearC = nearCol, passC = css(mixv(col(N - 1), [0, 0, 0], 0.3));
+  [[60, 1000, 820], [190, 1012, 620], [-30, 1040, 700], [300, 1020, 420], [1780, 990, 820], [1900, 1030, 900], [1650, 1000, 520], [1560, 1030, 360]]
+    .forEach(([x, y, h], i) => PL.sway.push({ spr: sprite(h, nearC, 300 + i), x, y: y + 4, z: 3.2 }));
+  PL.sway.push({ spr: sprite(940, passC, 401), x: 150, y: 1154, z: 1.7 }, { spr: sprite(1000, passC, 402), x: 1760, y: 1164, z: 1.7 });
+  if (LO.cabin) PL.cabinAt = [LO.cabin[0], LO.cabin[1] - 18 * LO.cabin[2]];
   return PL;
 }
