@@ -1,0 +1,982 @@
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Alberta Live</title>
+<style>html,body{margin:0;height:100%;background:#07060a;overflow:hidden}
+canvas{display:block;width:100vw;height:100vh;object-fit:contain;cursor:pointer}
+#ui{position:fixed;left:12px;bottom:10px;font:12px/1.4 system-ui,sans-serif;color:#bbb;text-shadow:0 1px 2px #000;user-select:none}</style></head>
+<body><canvas id="c" width="1920" height="1080"></canvas><div id="ui"></div>
+<script>'use strict';
+const B = { "title": "Alberta Live", "duration": 60, "fps": 24, "cues": {} };
+// ===== 00_core.js
+// Cinematic kit core: frame size, math, seeded noise, color, geometry helpers, shot list and keyframes.
+// Everything is drawn procedurally on a 2D canvas. Rule: every pixel is a function of t (no clocks, no Math.random).
+// B (the parsed src/beats.json) is put in front of this file by build.mjs.
+const W = 1920, H = 1080, FPS = B.fps || 24, DUR = B.duration;
+const SC = +(new URLSearchParams(location.search).get('scale') || 1); // render scale: 0.5 draft, 2 = 4K
+const cv = document.getElementById('c'); cv.width = W * SC; cv.height = H * SC;
+const CTX = cv.getContext('2d');
+const TAU = Math.PI * 2;
+const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const sstep = t => t * t * (3 - 2 * t);
+const E = {
+  in2: t => t * t, in3: t => t * t * t,
+  out2: t => 1 - (1 - t) * (1 - t), out3: t => 1 - Math.pow(1 - t, 3), out4: t => 1 - Math.pow(1 - t, 4),
+  io2: t => t < .5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2,
+  io3: t => t < .5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2,
+};
+// animation is shot "on twos" (12 drawings a second); camera moves stay on ones
+const on2 = t => Math.floor(t * 12 + 1e-6) / 12;
+
+function RNG(a) {
+  a = (a >>> 0) || 1;
+  return function () { a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function hash(i, s = 0) {
+  let h = Math.imul((i | 0) ^ Math.imul(s | 0, 0x9E3779B1), 0x85EBCA6B); h ^= h >>> 13; h = Math.imul(h, 0xC2B2AE35); h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function n1(x, s = 0) { const i = Math.floor(x), f = x - i, u = f * f * (3 - 2 * f); return lerp(hash(i, s), hash(i + 1, s), u) * 2 - 1; }
+function n2(x, y, s = 0) {
+  const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+  const h = (a, b) => hash(a + Math.imul(b, 57731), s);
+  return lerp(lerp(h(i, j), h(i + 1, j), u), lerp(h(i, j + 1), h(i + 1, j + 1), u), v) * 2 - 1;
+}
+function fbm(x, y, s = 0, o = 4) { let a = 0, m = 0.5, f = 1; for (let k = 0; k < o; k++) { a += m * n2(x * f, y * f, s + k * 17); f *= 2.03; m *= 0.5; } return a; }
+const gauss = r => (r() + r() + r() - 1.5) / 1.5;
+
+function mk(w, h) { const c = document.createElement('canvas'); c.width = Math.ceil(w); c.height = Math.ceil(h); return c; }
+
+// ---------- color ----------
+const _hx = {};
+function hx(c) {
+  if (Array.isArray(c)) return c;
+  if (_hx[c]) return _hx[c];
+  const v = [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16)); _hx[c] = v; return v;
+}
+const css = (c, a = 1) => { const v = hx(c); return a >= 1 ? `rgb(${v[0] | 0},${v[1] | 0},${v[2] | 0})` : `rgba(${v[0] | 0},${v[1] | 0},${v[2] | 0},${a})`; };
+const mixv = (a, b, t) => { a = hx(a); b = hx(b); return [lerp(a[0], b[0], t), lerp(a[1], b[1], t), lerp(a[2], b[2], t)]; };
+const mixc = (a, b, t, al = 1) => css(mixv(a, b, t), al);
+const jit = (c, r, amt) => { c = hx(c); const k = (r() - 0.5) * amt; return [c[0] + k + (r() - .5) * amt * .5, c[1] + k + (r() - .5) * amt * .5, c[2] + k + (r() - .5) * amt * .5]; };
+function stopsAt(stops, y) {
+  if (y <= stops[0][0]) return hx(stops[0][1]);
+  for (let i = 1; i < stops.length; i++) if (y <= stops[i][0]) return mixv(stops[i - 1][1], stops[i][1], (y - stops[i - 1][0]) / (stops[i][0] - stops[i - 1][0]));
+  return hx(stops[stops.length - 1][1]);
+}
+
+// shared palette: the default ink colors. Add the animation's own colors here or in its scene files.
+const P = {
+  ink: '#2a1610',      // warm sepia-black line for characters and props
+  inkCool: '#1d2230',  // cool line for night and shadow scenes
+  sun: '#fff2d4',      // light shafts and glows
+};
+function grade(pal, to, amt) { const o = {}; for (const k in pal) o[k] = mixv(pal[k], to, amt); return o; }
+// ---------- geometry helpers ----------
+function catmull(pts, closed = false, per = 6) {
+  const out = [], n = pts.length; if (n < 3) return pts.slice();
+  const g = i => closed ? pts[(i + n) % n] : pts[clamp(i, 0, n - 1)];
+  const m = closed ? n : n - 1;
+  for (let i = 0; i < m; i++) {
+    const p0 = g(i - 1), p1 = g(i), p2 = g(i + 1), p3 = g(i + 2);
+    for (let k = 0; k < per; k++) {
+      const t = k / per, t2 = t * t, t3 = t2 * t;
+      out.push([
+        0.5 * ((2 * p1[0]) + (-p0[0] + p2[0]) * t + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3),
+        0.5 * ((2 * p1[1]) + (-p0[1] + p2[1]) * t + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)]);
+    }
+  }
+  if (!closed) out.push(pts[n - 1]);
+  return out;
+}
+function bez(p0, p1, p2, p3, n = 16) { const o = []; for (let i = 0; i <= n; i++) { const t = i / n, u = 1 - t; o.push([u * u * u * p0[0] + 3 * u * u * t * p1[0] + 3 * u * t * t * p2[0] + t * t * t * p3[0], u * u * u * p0[1] + 3 * u * u * t * p1[1] + 3 * u * t * t * p2[1] + t * t * t * p3[1]]); } return o; }
+function densify(pts, closed, step = 10) {
+  const o = [], n = pts.length, m = closed ? n : n - 1;
+  for (let i = 0; i < m; i++) {
+    const a = pts[i], b = pts[(i + 1) % n], d = Math.hypot(b[0] - a[0], b[1] - a[1]), k = Math.max(1, Math.ceil(d / step));
+    for (let j = 0; j < k; j++) o.push([lerp(a[0], b[0], j / k), lerp(a[1], b[1], j / k)]);
+  }
+  if (!closed) o.push(pts[n - 1]);
+  return o;
+}
+function xf(pts, m) { // m = [a,b,c,d,e,f] like canvas transform
+  return pts.map(p => [m[0] * p[0] + m[2] * p[1] + m[4], m[1] * p[0] + m[3] * p[1] + m[5]]);
+}
+function mat(x, y, rot = 0, sx = 1, sy = sx) { const c = Math.cos(rot), s = Math.sin(rot); return [c * sx, s * sx, -s * sy, c * sy, x, y]; }
+function mmul(A, B) { return [A[0] * B[0] + A[2] * B[1], A[1] * B[0] + A[3] * B[1], A[0] * B[2] + A[2] * B[3], A[1] * B[2] + A[3] * B[3], A[0] * B[4] + A[2] * B[5] + A[4], A[1] * B[4] + A[3] * B[5] + A[5]]; }
+function path(g, pts, closed = true) { g.beginPath(); g.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]); if (closed) g.closePath(); }
+function fillPts(g, pts, col) { path(g, pts); g.fillStyle = col; g.fill(); }
+function area(pts) { let a = 0; for (let i = 0, n = pts.length; i < n; i++) { const p = pts[i], q = pts[(i + 1) % n]; a += p[0] * q[1] - q[0] * p[1]; } return a / 2; }
+function offsetPts(pts, dx, dy) { return pts.map(p => [p[0] + dx, p[1] + dy]); }
+// rough a polygon's edge so it reads hand-cut rather than vector
+function rough(pts, amt, seed, step = 8, closed = true) {
+  const d = densify(pts, closed, step), n = d.length, o = [];
+  for (let i = 0; i < n; i++) {
+    const a = d[(i - 1 + n) % n], b = d[(i + 1) % n];
+    let nx = -(b[1] - a[1]), ny = b[0] - a[0]; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
+    const k = amt * (n1(i * 0.35, seed) * 0.7 + n1(i * 1.7, seed + 5) * 0.3);
+    o.push([d[i][0] + nx * k, d[i][1] + ny * k]);
+  }
+  return o;
+}
+
+const SHOTS = [];
+// shot(name, t0, t1, prep, draw, o): prep() runs once (paint plates there); draw(g, local, t, state) runs every frame.
+// o.in = { type: 'dissolve' | 'dip', dur, color } blends from the previous shot, which keeps running during the overlap.
+function shot(name, t0, t1, prep, draw, o = {}) { SHOTS.push({ name, t0, t1, prep, draw, in: o.in, ready: false }); }
+// keyframes: kf(t, [[t0, v0], [t1, v1], ...], ease) for numbers or arrays of numbers
+function kf(t, keys, ease = E.io2) {
+  if (t <= keys[0][0]) return keys[0][1];
+  for (let i = 1; i < keys.length; i++) {
+    if (t <= keys[i][0]) {
+      const [a, va] = keys[i - 1], [b, vb] = keys[i], u = (keys[i][2] || ease)((t - a) / (b - a));
+      return Array.isArray(va) ? va.map((v, k) => lerp(v, vb[k], u)) : lerp(va, vb, u);
+    }
+  }
+  return keys[keys.length - 1][1];
+}
+
+// ===== 01_ink.js
+// ---------- tapered ink lines and cel shapes ----------
+// An open stroke: width swells from a fine point, wavers a little (seeded, so it never boils), and tapers out.
+function ink(g, pts, w, o = {}) {
+  const n = pts.length; if (n < 2 || w <= 0) return;
+  const L = [0]; for (let i = 1; i < n; i++) L.push(L[i - 1] + Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]));
+  const tot = L[n - 1] || 1, t0 = o.t0 ?? 0.3, t1 = o.t1 ?? 0.3, mn = o.min ?? 0.12, jv = o.jit ?? 0.22, seed = o.seed ?? 1, jl = o.jl ?? 60;
+  const left = [], right = [];
+  for (let i = 0; i < n; i++) {
+    const s = L[i] / tot;
+    const a = t0 > 0 ? Math.min(1, s / t0) : 1, b = t1 > 0 ? Math.min(1, (1 - s) / t1) : 1;
+    const pr = Math.sin(Math.min(a, b) * Math.PI / 2);
+    let ww = w * (mn + (1 - mn) * pr) * (1 + jv * n1(L[i] / jl, seed)) * 0.5;
+    if (o.wf) ww *= o.wf(s);
+    const p = pts[Math.max(0, i - 1)], q = pts[Math.min(n - 1, i + 1)];
+    let nx = -(q[1] - p[1]), ny = q[0] - p[0]; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
+    left.push([pts[i][0] + nx * ww, pts[i][1] + ny * ww]); right.push([pts[i][0] - nx * ww, pts[i][1] - ny * ww]);
+  }
+  g.beginPath(); g.moveTo(left[0][0], left[0][1]);
+  for (let i = 1; i < n; i++) g.lineTo(left[i][0], left[i][1]);
+  for (let i = n - 1; i >= 0; i--) g.lineTo(right[i][0], right[i][1]);
+  g.closePath(); g.fillStyle = o.col || P.ink; g.globalAlpha = o.a ?? 1; g.fill(); g.globalAlpha = 1;
+}
+// A closed outline whose weight swells on the side turned away from the light, like a brush-inked cel.
+function inkLoop(g, pts, w, o = {}) {
+  const n = pts.length; if (n < 3 || w <= 0) return;
+  const sgn = area(pts) > 0 ? 1 : -1, lx = o.lx ?? -0.6, ly = o.ly ?? -0.8, bias = o.bias ?? 0.55, seed = o.seed ?? 3, jv = o.jit ?? 0.25;
+  const outer = [], inner = []; let L = 0;
+  for (let i = 0; i < n; i++) {
+    const p = pts[(i - 1 + n) % n], q = pts[(i + 1) % n];
+    if (i) L += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+    let nx = (q[1] - p[1]) * sgn, ny = -(q[0] - p[0]) * sgn; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l; // outward
+    const away = -(nx * lx + ny * ly);
+    const ww = w * 0.5 * Math.max(0.25, 1 + bias * away) * (1 + jv * n1(L / (o.jl ?? 50), seed));
+    outer.push([pts[i][0] + nx * ww * 0.5, pts[i][1] + ny * ww * 0.5]); inner.push([pts[i][0] - nx * ww * 1.5, pts[i][1] - ny * ww * 1.5]);
+  }
+  g.beginPath(); g.moveTo(outer[0][0], outer[0][1]); for (let i = 1; i < n; i++) g.lineTo(outer[i][0], outer[i][1]); g.closePath();
+  g.moveTo(inner[0][0], inner[0][1]); for (let i = n - 1; i >= 0; i--) g.lineTo(inner[i][0], inner[i][1]); g.closePath();
+  g.fillStyle = o.col || P.ink; g.globalAlpha = o.a ?? 1; g.fill('evenodd'); g.globalAlpha = 1;
+}
+// A cel: flat base, a hard-edged rim crescent on the side facing the light, designed shadow shapes, inked outline.
+// o: { base, rim, rimW, lx, ly, shade:[{pts,col}], line, lw, seed, after(g) }
+function cel(g, pts, o) {
+  path(g, pts); g.fillStyle = css(o.base); g.fill();
+  if (o.rim || o.shade || o.after) {
+    g.save(); path(g, pts); g.clip();
+    if (o.rim) {
+      const rw = o.rimW ?? 6, lx = o.lx ?? -0.6, ly = o.ly ?? -0.8;
+      g.fillStyle = css(o.rim); g.fill();
+      path(g, offsetPts(pts, -lx * rw, -ly * rw)); g.fillStyle = css(o.base); g.fill();
+    }
+    if (o.shade) for (const s of o.shade) { path(g, s.pts); g.fillStyle = css(s.col, s.a ?? 1); g.fill(); }
+    if (o.after) o.after(g);
+    g.restore();
+  }
+  if (o.lw !== 0) inkLoop(g, pts, o.lw ?? 3, { col: o.line, lx: o.lx, ly: o.ly, seed: o.seed ?? 3, bias: o.bias, a: o.la });
+}
+// inner detail line (panel seam, fold): fine, tapered both ends
+function seam(g, pts, w, col, seed = 7, a = 1) { ink(g, pts.length < 4 ? densify(pts, false, 6) : pts, w, { col, seed, t0: 0.25, t1: 0.25, min: 0.05, a }); }
+
+// ===== 02_paint.js
+// ---------- painted background tools (gouache / watercolor on paper) ----------
+// a single brush dab: tapered, slightly bent, edges uneven
+function dab(g, x, y, len, wid, ang, col, a, r) {
+  const k = 9, top = [], bot = [], bend = (r() - 0.5) * 0.35 * wid, c = Math.cos(ang), s = Math.sin(ang);
+  for (let i = 0; i <= k; i++) {
+    const u = i / k, px = (u - 0.5) * len, py = bend * 4 * u * (1 - u);
+    const w = wid * Math.pow(Math.sin(Math.PI * (0.04 + u * 0.92)), 0.45) * 0.5;
+    top.push([px, py - w * (0.8 + 0.4 * r())]); bot.push([px, py + w * (0.8 + 0.4 * r())]);
+  }
+  g.beginPath();
+  const all = top.concat(bot.reverse());
+  for (let i = 0; i < all.length; i++) { const p = all[i], X = x + p[0] * c - p[1] * s, Y = y + p[0] * s + p[1] * c; i ? g.lineTo(X, Y) : g.moveTo(X, Y); }
+  g.closePath(); g.fillStyle = css(col, a); g.fill();
+}
+// dry brush: separate bristle marks that skip over the paper tooth
+function bristle(g, x, y, len, wid, ang, col, a, r, nb = 7) {
+  const c = Math.cos(ang), s = Math.sin(ang);
+  g.lineCap = 'round';
+  for (let b = 0; b < nb; b++) {
+    const off = (b / (nb - 1) - 0.5) * wid, st = r() * 0.25 * len, en = len * (0.7 + 0.3 * r());
+    g.strokeStyle = css(col, a * (0.35 + 0.65 * r())); g.lineWidth = wid / nb * (0.8 + r());
+    g.beginPath();
+    let on = false;
+    for (let u = st; u <= en; u += len / 14) {
+      const px = u - len / 2, py = off + (r() - 0.5) * wid * 0.08, X = x + px * c - py * s, Y = y + px * s + py * c;
+      if (r() < 0.12) { on = false; continue; }
+      on ? g.lineTo(X, Y) : g.moveTo(X, Y); on = true;
+    }
+    g.stroke();
+  }
+}
+// fill a region with opaque base paint, then work texture into it with dabs, clipped to the region
+function paintRegion(g, pts, base, r, o = {}) {
+  g.save(); path(g, pts); g.fillStyle = css(base); g.fill(); g.clip();
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9; for (const p of pts) { x0 = Math.min(x0, p[0]); y0 = Math.min(y0, p[1]); x1 = Math.max(x1, p[0]); y1 = Math.max(y1, p[1]); }
+  const sz = o.size ?? 40, n = Math.min(o.max ?? 4000, Math.floor((x1 - x0) * (y1 - y0) / (sz * sz) * (o.dens ?? 1.2)));
+  const cols = o.cols || [base], ang = o.ang ?? 0, av = o.angVar ?? 0.25;
+  for (let i = 0; i < n; i++) {
+    const x = lerp(x0, x1, r()), y = lerp(y0, y1, r());
+    const col = o.colAt ? o.colAt(x, y, r) : jit(cols[Math.floor(r() * cols.length)], r, o.var ?? 10);
+    const L = sz * (0.8 + r() * (o.stretch ?? 2.2));
+    (o.dry && r() < o.dry ? bristle : dab)(g, x, y, L, sz * (0.35 + r() * 0.5), ang + (r() - 0.5) * av, col, (o.a ?? 0.28) * (0.5 + r()), r);
+  }
+  if (o.after) o.after(g);
+  g.restore();
+  if (o.edge) { // pigment pooling at the edge
+    ink(g, densify(pts.concat([pts[0]]), false, 8), o.edge, { col: o.edgeCol || mixc(base, '#000000', 0.35), a: o.edgeA ?? 0.35, t0: 0, t1: 0, min: 0.5, jit: 0.5, seed: 11 });
+  }
+}
+// graded sky built from horizontal brush strokes over a base wash (reads as painted, not airbrushed)
+function paintSky(g, w, h, stops, r, o = {}) {
+  const gr = g.createLinearGradient(0, 0, 0, h);
+  for (const [y, c] of stops) gr.addColorStop(clamp(y / h), css(c));
+  g.fillStyle = gr; g.fillRect(0, 0, w, h);
+  const n = o.n ?? Math.floor(w * h / 900);
+  for (let i = 0; i < n; i++) {
+    const x = r() * w, y = r() * h, col = jit(stopsAt(stops, y + (r() - 0.5) * (o.mixY ?? 60)), r, o.var ?? 9);
+    dab(g, x, y, 90 + r() * 360, 10 + r() * 30, (r() - 0.5) * 0.05 + (o.ang ?? 0), col, 0.16 + r() * 0.22, r);
+  }
+}
+// long low dawn cloud: plum body, warm under-lit belly, a few lit dry-brush streaks
+function stratus(g, cx, cy, len, th, body, lit, r, o = {}) {
+  const n = Math.floor(len / 9);
+  for (let i = 0; i < n; i++) {
+    const u = r() * 2 - 1, x = cx + u * len / 2, env = Math.pow(1 - u * u, 0.7), y = cy + gauss(r) * th * 0.35 * env;
+    dab(g, x, y, 40 + r() * 140 * env, th * (0.25 + 0.5 * env * r()), (r() - 0.5) * 0.06, jit(body, r, 10), 0.35 + 0.4 * r(), r);
+  }
+  for (let i = 0; i < n * 0.55; i++) {
+    const u = r() * 2 - 1, x = cx + u * len / 2 * 0.95, env = Math.pow(1 - u * u, 0.7), y = cy + th * (0.12 + 0.18 * env) + gauss(r) * th * 0.08;
+    const lcol = jit(lit, r, 14);
+    (r() < 0.5 ? bristle : dab)(g, x, y, 30 + r() * 120 * env, th * (0.08 + 0.14 * r()), (r() - 0.5) * 0.04, lcol, (o.litA ?? 0.55) * (0.4 + 0.6 * r()), r, 5);
+  }
+}
+// paper: low-frequency mottling + fibres + tooth. Used as an overlay on painted plates.
+let PAPER = null;
+function paper() {
+  if (PAPER) return PAPER;
+  const w = 960, h = 540, c = mk(w, h), g = c.getContext('2d'), id = g.createImageData(w, h), d = id.data;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const v = 128 + 26 * fbm(x / 90, y / 90, 3, 3) + 12 * n2(x / 9, y / 9, 8) + 14 * (hash(x + y * w, 2) - 0.5);
+    const k = (y * w + x) * 4; d[k] = d[k + 1] = d[k + 2] = v; d[k + 3] = 255;
+  }
+  g.putImageData(id, 0, 0);
+  const r = RNG(77);
+  g.lineCap = 'round';
+  for (let i = 0; i < 900; i++) { const x = r() * w, y = r() * h, a = r() * TAU, l = 4 + r() * 16; g.strokeStyle = `rgba(${r() < 0.5 ? 90 : 170},${r() < 0.5 ? 90 : 170},${r() < 0.5 ? 90 : 170},0.25)`; g.lineWidth = 0.6; g.beginPath(); g.moveTo(x, y); g.quadraticCurveTo(x + Math.cos(a + 0.5) * l * 0.5, y + Math.sin(a + 0.5) * l * 0.5, x + Math.cos(a) * l, y + Math.sin(a) * l); g.stroke(); }
+  PAPER = c; return c;
+}
+function paperOver(g, w, h, a = 0.35, op = 'overlay') {
+  // apply the paper only where the plate already has paint (transparent plates stay transparent)
+  const c = g.canvas, tmp = mk(c.width, c.height), tg = tmp.getContext('2d');
+  tg.drawImage(c, 0, 0); tg.globalCompositeOperation = op; tg.globalAlpha = a; tg.drawImage(paper(), 0, 0, c.width, c.height);
+  g.save(); g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'source-atop'; g.drawImage(tmp, 0, 0); g.restore();
+}
+// screen-space film tooth: fixed (never animated), so paused frames and playback look the same
+let TOOTH = null;
+function tooth() {
+  if (TOOTH) return TOOTH;
+  const c = mk(512, 512), g = c.getContext('2d'), id = g.createImageData(512, 512), d = id.data;
+  for (let i = 0; i < 512 * 512; i++) { const v = 128 + 40 * (hash(i, 41) - 0.5) + 18 * n2((i % 512) / 3, Math.floor(i / 512) / 3, 5); d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v; d[i * 4 + 3] = 255; }
+  g.putImageData(id, 0, 0); TOOTH = c; return c;
+}
+// light shafts: a fan of streaky painted wedges, rendered once, then composited with "screen" at low strength
+function rayFan(R, nRays, seed, warm = P.sun) {
+  const c = mk(R * 2, R * 2), g = c.getContext('2d'), r = RNG(seed);
+  g.translate(R, R);
+  for (let i = 0; i < nRays; i++) {
+    const a0 = r() * TAU, wdt = 0.02 + r() * 0.07, len = R * (0.55 + r() * 0.45);
+    const grd = g.createLinearGradient(0, 0, Math.cos(a0) * len, Math.sin(a0) * len);
+    grd.addColorStop(0, css(warm, 0.0)); grd.addColorStop(0.08, css(warm, 0.55)); grd.addColorStop(0.6, css(warm, 0.22)); grd.addColorStop(1, css(warm, 0));
+    g.beginPath(); g.moveTo(0, 0);
+    g.lineTo(Math.cos(a0 - wdt) * len, Math.sin(a0 - wdt) * len); g.lineTo(Math.cos(a0 + wdt) * len, Math.sin(a0 + wdt) * len); g.closePath();
+    g.fillStyle = grd; g.globalAlpha = 0.35 + r() * 0.5; g.fill();
+    // streaks inside the shaft so it isn't a smooth airbrushed wedge
+    g.globalAlpha = 1;
+    for (let k = 0; k < 6; k++) { const aa = a0 + (r() - 0.5) * wdt * 1.6, l2 = len * (0.4 + r() * 0.6); bristle(g, Math.cos(aa) * l2 * 0.5, Math.sin(aa) * l2 * 0.5, l2, len * wdt * 0.5, aa, warm, 0.12, r, 4); }
+  }
+  return c;
+}
+// distant dust motes drifting in the light: deterministic positions from time
+function motes(g, t, n, seed, box, col, a, sz = 2.2) {
+  for (let i = 0; i < n; i++) {
+    const h1 = hash(i, seed), h2 = hash(i, seed + 1), h3 = hash(i, seed + 2);
+    const x = box[0] + ((h1 * box[2] + t * (8 + h3 * 14) + 30 * n1(t * 0.2 + i, seed)) % box[2] + box[2]) % box[2];
+    const y = box[1] + ((h2 * box[3] - t * (3 + h3 * 6) + 20 * n1(t * 0.17 + i * 3, seed + 9)) % box[3] + box[3]) % box[3];
+    const s = sz * (0.5 + h3);
+    g.fillStyle = css(col, a * (0.4 + 0.6 * h2)); g.beginPath(); g.ellipse(x, y, s, s * 0.8, h1 * 3, 0, TAU); g.fill();
+  }
+}
+
+// ===== 03_shapes.js
+function cels(g, pts, o) {
+  const L = o.L || { lx: -0.6, ly: -0.8 }, sw = o.sw ?? 0, rw = o.rw ?? 0;
+  path(g, pts); g.fillStyle = css(sw ? (o.sh ?? o.base) : o.base); g.fill();
+  g.save(); path(g, pts); g.clip();
+  if (sw) { path(g, offsetPts(pts, L.lx * sw, L.ly * sw)); g.fillStyle = css(o.base); g.fill(); }
+  if (o.shade) for (const s of o.shade) { path(g, s.pts); g.fillStyle = css(s.col, s.a ?? 1); g.fill(); }
+  if (rw && o.rim) {
+    g.beginPath(); const sh = offsetPts(pts, -L.lx * rw, -L.ly * rw);
+    g.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) g.lineTo(pts[i][0], pts[i][1]); g.closePath();
+    g.moveTo(sh[0][0], sh[0][1]); for (let i = 1; i < sh.length; i++) g.lineTo(sh[i][0], sh[i][1]); g.closePath();
+    g.fillStyle = css(o.rim, o.rimA ?? 1); g.fill('evenodd');
+  }
+  if (o.after) o.after(g);
+  g.restore();
+  if (o.lw !== 0) inkLoop(g, pts, o.lw ?? 3, { col: o.line, lx: L.lx, ly: L.ly, seed: o.seed ?? 3, bias: o.bias ?? 0.5, a: o.la });
+}
+// capsule between two joints, with an optional muscle/cloth bulge on one side (bul > 0 bulges left of a->b)
+function capsule(a, b, w0, w1, bul = 0, n = 10) {
+  const dx = b[0] - a[0], dy = b[1] - a[1], L = Math.hypot(dx, dy) || 1, ux = dx / L, uy = dy / L, nx = -uy, ny = ux;
+  const out = [];
+  for (let i = 0; i <= n; i++) { const s = i / n, w = lerp(w0, w1, s) / 2 + bul * Math.sin(Math.PI * s) * (bul > 0 ? 1 : 0); out.push([a[0] + dx * s + nx * w, a[1] + dy * s + ny * w]); }
+  for (let i = 1; i < 8; i++) { const an = Math.PI / 2 - Math.PI * i / 8; out.push([b[0] + (ux * Math.cos(an) + nx * Math.sin(an)) * w1 / 2, b[1] + (uy * Math.cos(an) + ny * Math.sin(an)) * w1 / 2]); }
+  for (let i = n; i >= 0; i--) { const s = i / n, w = lerp(w0, w1, s) / 2 + (-bul) * Math.sin(Math.PI * s) * (bul < 0 ? 1 : 0); out.push([a[0] + dx * s - nx * w, a[1] + dy * s - ny * w]); }
+  for (let i = 1; i < 8; i++) { const an = -Math.PI / 2 - Math.PI * i / 8; out.push([a[0] + (ux * Math.cos(an) + nx * Math.sin(an)) * w0 / 2, a[1] + (uy * Math.cos(an) + ny * Math.sin(an)) * w0 / 2]); }
+  return out;
+}
+const pol = (p, ang, len) => [p[0] + Math.cos(ang) * len, p[1] + Math.sin(ang) * len];
+function rib(c, w, taper0 = 0.0, taper1 = 1.0, prof) { // tapered filled band along a centreline
+  const Lf = [], Rt = [], n = c.length;
+  for (let i = 0; i < n; i++) {
+    const s = i / (n - 1), p = c[Math.max(0, i - 1)], q = c[Math.min(n - 1, i + 1)];
+    let nx = -(q[1] - p[1]), ny = q[0] - p[0]; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l;
+    const ww = (prof ? prof(s) : (Math.min(1, s / Math.max(1e-3, taper0)) * Math.pow(Math.max(0, 1 - Math.max(0, s - (1 - taper1)) / Math.max(1e-3, taper1)), 0.6))) * w * 0.5 + 0.3;
+    Lf.push([c[i][0] + nx * ww, c[i][1] + ny * ww]); Rt.push([c[i][0] - nx * ww, c[i][1] - ny * ww]);
+  }
+  return Lf.concat(Rt.reverse());
+}
+function cloudMass(g, cx, cy, rx, ry, body, top, base, r, lit) {
+  const lumps = 7 + Math.floor(r() * 6), L = [];
+  for (let i = 0; i < lumps; i++) { const u = (i / (lumps - 1)) * 2 - 1; L.push([cx + u * rx * (0.9 + 0.1 * r()), cy - Math.sqrt(1 - u * u * 0.9) * ry * (0.5 + 0.6 * r()), ry * (0.45 + 0.4 * r())]); }
+  for (const [x, y, rr] of L) for (let j = 0; j < 70; j++) { const a = r() * TAU, d = Math.sqrt(r()) * rr; dab(g, x + Math.cos(a) * d, y + Math.sin(a) * d * 0.8, 30 + r() * 80, 14 + r() * 30, (r() - 0.5) * 0.6, jit(body, r, 8), 0.3 + 0.3 * r(), r); }
+  for (const [x, y, rr] of L) for (let j = 0; j < 30; j++) { const a = -Math.PI / 2 + (r() - 0.5) * 2.0, d = rr * (0.45 + 0.4 * r()); dab(g, x + Math.cos(a) * d, y + Math.sin(a) * d * 0.8, 24 + r() * 50, 10 + r() * 16, a + Math.PI / 2 + (r() - 0.5) * 0.5, jit(top, r, 10), (lit ? 0.2 : 0.14) * (0.4 + 0.6 * r()), r); }
+  for (let j = 0; j < 90; j++) { const u = r() * 2 - 1; dab(g, cx + u * rx, cy + 10 + r() * ry * 0.25, 60 + r() * 140, 10 + r() * 24, (r() - 0.5) * 0.08, jit(base, r, 6), 0.3 + 0.3 * r(), r); }
+}
+
+// ===== 04_kit.js
+// painting kit: foliage clumps, trees, clouds, grass, haze, camera, and plates (paintings rendered once and cached)
+function leafDab(g, x, y, s, ang, col, a, r) { dab(g, x, y, s * (1.3 + 0.6 * r()), s * (0.8 + 0.4 * r()), ang, col, a, r); }
+function scallop(x, y, R, seed, n = 14, sq = 0.88) {
+  const pts = [], N = Math.max(48, n * 8), ph = hash(seed, 1) * 6;
+  for (let k = 0; k < N; k++) {
+    const th = k / N * TAU, bump = Math.pow(Math.abs(Math.sin(n * th / 2 + ph + 0.25 * n1(th * 2, seed))), 0.55);
+    const rr = R * (0.86 + 0.14 * bump) * (1 + 0.07 * n1(th * 1.6, seed + 9));
+    pts.push([x + Math.cos(th) * rr, y + Math.sin(th) * rr * sq]);
+  }
+  return pts;
+}
+function clump(g, x, y, R, C, r, o = {}) {
+  const sd = Math.floor(r() * 1e4), sil = scallop(x, y, R, sd, R > 40 ? 11 : 8);
+  path(g, sil); g.fillStyle = css(C(0)); g.fill();
+  g.save(); path(g, sil); g.clip();
+  path(g, scallop(x - R * 0.12, y - R * 0.16, R * 0.95, sd + 1, 10)); g.fillStyle = css(C(1)); g.fill();
+  path(g, scallop(x - R * 0.34, y - R * 0.4, R * 0.78, sd + 2, 9)); g.fillStyle = css(C(2)); g.fill();
+  if (R > 8) {
+    const ds = Math.max(2, R * (o.dab ?? 0.085));
+    // leaf marks breaking the tone boundaries
+    for (let i = 0; i < R * 0.9 * (o.dens ?? 1); i++) { const th = r() * TAU, rr = R * (0.55 + 0.4 * r()); const px = x - R * 0.12 + Math.cos(th) * rr, py = y - R * 0.16 + Math.sin(th) * rr * 0.88; leafDab(g, px, py, ds, r() * TAU, jit(C(r() < 0.5 ? 1 : 0), r, 10), 0.9, r); }
+    for (let i = 0; i < R * 0.6 * (o.dens ?? 1); i++) { const th = -2.2 + (r() - 0.5) * 2.6, rr = R * (0.5 + 0.35 * r()); leafDab(g, x - R * 0.34 + Math.cos(th) * rr * 0.9, y - R * 0.4 + Math.sin(th) * rr * 0.8, ds, r() * TAU, jit(C(r() < 0.6 ? 2 : 1), r, 12), 0.9, r); }
+    for (let i = 0; i < R * 0.25; i++) { const th = -2.2 + (r() - 0.5) * 1.6, rr = R * (0.55 + 0.3 * r()); leafDab(g, x - R * 0.3 + Math.cos(th) * rr, y - R * 0.35 + Math.sin(th) * rr * 0.85, ds * 0.8, r() * TAU, jit(C(3), r, 10), 0.95, r); }
+    if (o.sky && R > 30) for (let i = 0; i < 2; i++) { const px = x + (r() - 0.3) * R * 0.8, py = y + (r() - 0.2) * R * 0.6; for (let k = 0; k < 3; k++) leafDab(g, px + (r() - 0.5) * ds * 2.2, py + (r() - 0.5) * ds * 2.2, ds * 0.7, r() * TAU, o.sky, 1, r); }
+  }
+  g.restore();
+  if (R > 8) { const ds = Math.max(2, R * (o.dab ?? 0.085)); for (let i = 0; i < R * 0.35; i++) { const th = r() * TAU, rr = R * (0.95 + 0.12 * r()); leafDab(g, x + Math.cos(th) * rr, y + Math.sin(th) * rr * 0.88, ds * 0.8, r() * TAU, jit(C(Math.sin(th) < -0.2 && Math.cos(th) < 0.3 ? 2 : 1), r, 12), 1, r); } }
+  if (o.line) inkLoop(g, sil, Math.max(0.8, R * 0.018), { col: o.line, a: 0.45, seed: sd });
+}
+function crown(g, cx, cy, rx, ry, pal, r, o = {}) {
+  const haze = o.haze, hz = o.hazeAmt ?? 0;
+  const C = k => haze ? mixv(pal[k], haze, hz) : hx(pal[k]);
+  const n = o.lumps ?? 9, cl = [];
+  for (let i = 0; i < n; i++) {
+    const a = r() * TAU, d = Math.sqrt(r()) * (o.spread ?? 0.6);
+    cl.push([cx + Math.cos(a) * d * rx, cy + Math.sin(a) * d * ry, Math.min(rx, ry) * (0.3 + 0.28 * r()) * (o.big ?? 1)]);
+  }
+  if (o.extra) cl.push(...o.extra);
+  cl.sort((a, b) => a[1] - b[1]);
+  for (const [x, y, R] of cl) clump(g, x, y, R, C, r, { sky: o.sky, dens: o.dens, line: o.line, dab: o.dabK });
+}
+function trunk(g, x, y, h, w, r, o = {}) {
+  const bark = o.bark || '#5a3a2a', barkDk = o.barkDk || '#2e1e18', barkLt = o.barkLt || '#a07a5a';
+  const lean = o.lean ?? 0.05, ends = [];
+  const limbs = [];
+  const spine = [[x, y], [x + lean * h * 0.3, y - h * 0.35], [x + lean * h * 0.5 + (r() - 0.5) * w * 0.4, y - h * 0.62], [x + lean * h * 0.7, y - h * 0.8]];
+  limbs.push({ c: catmull(spine, false, 6), w0: w, w1: w * 0.4 });
+  const nb = o.limbs ?? 5;
+  for (let i = 0; i < nb; i++) {
+    const u = 0.56 + 0.3 * (i / (nb - 1 || 1)) + (r() - 0.5) * 0.05, side = i % 2 ? 1 : -1;
+    const p0 = [lerp(spine[1][0], spine[3][0], u), y - h * u];
+    const len = h * (0.26 + 0.16 * r()) * (1 - u * 0.4), ang = -Math.PI / 2 + side * (0.45 + 0.35 * r());
+    const p2 = [p0[0] + Math.cos(ang) * len, p0[1] + Math.sin(ang) * len], p1 = [lerp(p0[0], p2[0], 0.5) + side * len * 0.08, lerp(p0[1], p2[1], 0.5) + len * 0.1];
+    limbs.push({ c: catmull([p0, p1, p2], false, 6), w0: w * (0.45 - 0.15 * u), w1: w * 0.08 });
+    ends.push(p2);
+  }
+  ends.push(spine[3]);
+  for (const L of limbs) {
+    const shape = rib(L.c, 1, 0, 1, s => lerp(L.w0, L.w1, s) / 1);
+    path(g, shape); g.fillStyle = css(bark); g.fill();
+    g.save(); path(g, shape); g.clip();
+    path(g, offsetPts(shape, w * 0.28, 0)); g.fillStyle = css(barkDk, 0.55); g.fill(); // shade side (right)
+    for (let i = 0; i < 26; i++) { const k = Math.floor(r() * (L.c.length - 2)), p = L.c[k], q = L.c[k + 1]; bristle(g, p[0] + (r() - 0.5) * L.w0 * 0.6, p[1], 10 + r() * 30, 3 + r() * 4, Math.atan2(q[1] - p[1], q[0] - p[0]), r() < 0.5 ? barkLt : barkDk, 0.35, r, 3); }
+    g.restore();
+    inkLoop(g, shape, Math.max(1.4, w * 0.05), { col: '#22140e', seed: 5 + limbs.indexOf(L), lx: -0.8, ly: -0.4 });
+  }
+  // roots flare
+  if (o.roots !== false) for (const sd of [-1, 1]) { const rt = [[x + sd * w * 0.2, y - h * 0.06], [x + sd * w * 0.55, y - 4], [x + sd * w * 0.9, y + 2]]; const shp = rib(catmull(rt, false, 4), 1, 0, 1, s => lerp(w * 0.5, 2, s)); path(g, shp); g.fillStyle = css(sd > 0 ? barkDk : bark); g.fill(); }
+  return ends;
+}
+function tree(g, x, y, h, w, pal, r, o = {}) {
+  const ends = trunk(g, x, y, h, w, r, o);
+  const cr = o.crownR ?? h * 0.42;
+  const extra = ends.map(p => [p[0] + (r() - 0.5) * cr * 0.2, p[1] - cr * 0.05, cr * (0.32 + 0.12 * r()) * (o.big ?? 1)]);
+  crown(g, x + (o.lean ?? 0.05) * h * 0.6, y - h * (o.crownY ?? 0.8), cr * 1.25, cr * 0.7, pal, r, { lumps: o.lumps ?? 8, big: o.big, spread: o.spread, extra, sky: o.sky, haze: o.haze, hazeAmt: o.hazeAmt, dens: o.dens, line: o.line });
+  if (o.twigs) {}
+  return ends;
+}
+function cumulus(g, cx, cy, w, h, pal, r, o = {}) {
+  const bumps = [], n = o.n ?? (5 + Math.floor(r() * 4)), base = cy + h * 0.2;
+  for (let i = 0; i < n; i++) {
+    const u = (i + 0.5) / n * 2 - 1, env = Math.pow(1 - u * u, 0.6);
+    bumps.push([cx + u * w * 0.46 + (r() - 0.5) * w * 0.05, cy - env * h * (0.3 + 0.3 * r()), (0.14 + 0.12 * r() + 0.14 * env) * w * 0.6]);
+  }
+  for (let i = 0; i < (o.extra ?? 3); i++) bumps.push([cx + (r() - 0.5) * w * 0.45, cy - h * (0.5 + 0.35 * r()), w * (0.09 + 0.07 * r())]);
+  for (let i = 0; i < (o.front ?? 3); i++) bumps.push([cx + (r() - 0.5) * w * 0.7, base - w * 0.06, w * (0.07 + 0.05 * r())]);
+  bumps.sort((a, b) => a[1] - b[1]);
+  const lx = o.lx ?? -0.55, ly = o.ly ?? -0.85, all = new Path2D();
+  g.save(); g.beginPath(); g.rect(cx - w, cy - h * 3, w * 2, base - (cy - h * 3)); g.clip();
+  for (const [x, y, rr] of bumps) {
+    const sd = Math.floor(x * 7 + y);
+    const sil = scallop(x, y, rr, sd, 9, 0.9);
+    all.moveTo(sil[0][0], sil[0][1]); for (const q of sil) all.lineTo(q[0], q[1]); all.closePath();
+    path(g, sil); g.fillStyle = css(pal.sh); g.fill();
+    g.save(); path(g, sil); g.clip();
+    path(g, scallop(x + lx * rr * 0.3, y + ly * rr * 0.3, rr * 0.96, sd + 1, 8, 0.9)); g.fillStyle = css(pal.mid); g.fill();
+    path(g, scallop(x + lx * rr * 0.55, y + ly * rr * 0.55, rr * 0.82, sd + 2, 7, 0.9)); g.fillStyle = css(pal.lit); g.fill();
+    for (let k = 0; k < 10; k++) { const a = Math.atan2(ly, lx) + (r() - 0.5) * 2.2, d = rr * (0.6 + 0.3 * r()); dab(g, x + lx * rr * 0.2 + Math.cos(a) * d, y + ly * rr * 0.2 + Math.sin(a) * d * 0.9, rr * (0.25 + 0.3 * r()), rr * (0.06 + 0.07 * r()), a + Math.PI / 2, jit(r() < 0.5 ? pal.lit : pal.hi, r, 6), 0.4 + 0.3 * r(), r); }
+    for (let k = 0; k < 6; k++) { const a = Math.atan2(-ly, -lx) + (r() - 0.5) * 1.6, d = rr * (0.7 + 0.25 * r()); dab(g, x + Math.cos(a) * d, y + Math.sin(a) * d * 0.9, rr * (0.3 + 0.3 * r()), rr * 0.07, a + Math.PI / 2, jit(pal.base || pal.sh, r, 6), 0.35, r); }
+    g.restore();
+  }
+  // flat, cool underside
+  g.clip(all);
+  for (let k = 0; k < 26; k++) dab(g, cx + (r() - 0.5) * w * 0.85, base - r() * h * 0.18, w * (0.08 + 0.12 * r()), h * 0.05 + 3, (r() - 0.5) * 0.03, jit(pal.base || pal.sh, r, 5), 0.5, r);
+  g.restore();
+}
+function blades(g, x0, x1, yAt, n, r, cols, hgt, o = {}) {
+  for (let i = 0; i < n; i++) {
+    const x = lerp(x0, x1, r()), y = yAt(x) + r() * (o.depth ?? 30), hh = hgt * (0.5 + r()), bend = (r() - 0.3) * hh * 0.5;
+    ink(g, catmull([[x, y], [x + bend * 0.3, y - hh * 0.55], [x + bend, y - hh]], false, 3), Math.max(1.2, hgt * 0.07), { col: css(jit(cols[Math.floor(r() * cols.length)], r, 14)), a: o.a ?? 0.9, t0: 0.0, t1: 0.9, min: 0.15, seed: i });
+  }
+}
+function hazeBand(g, x0, x1, y, h, col, a, r) { for (let i = 0; i < 80; i++) bristle(g, lerp(x0, x1, r()), y + (r() - 0.5) * h, 200 + r() * 400, h * (0.3 + 0.4 * r()), (r() - 0.5) * 0.04, col, a * (0.4 + 0.6 * r()), r, 6); }
+function cam(g, cx, cy, z) { g.translate(W / 2, H / 2); g.scale(z, z); g.translate(-cx, -cy); }
+function plateDraw(g, pl) { g.drawImage(pl.c, pl.ox, pl.oy, pl.c.width / pl.S, pl.c.height / pl.S); }
+function makePlate(x0, y0, w, h, S, fn) { const c = mk(w * S, h * S), g = c.getContext('2d'); g.scale(S, S); g.translate(-x0, -y0); fn(g); return { c, ox: x0, oy: y0, S }; }
+
+// ===== 05_alpine.js
+// ---------- Rockies kit: painted mountains, spruces, a mirror lake, a log cabin ----------
+// Built on the painting tools (dab, bristle, paintRegion, ink). Every function paints into a plate once;
+// nothing here runs per frame.
+
+// a ridgeline from a few hand-placed summits, roughened by midpoint displacement (seeded)
+function ridgeLine(keys, seed, rough = 60, x0 = -80, x1 = W + 80) {
+  const r = RNG(seed);
+  let pts = keys.map(k => [k[0], k[1]]);
+  for (let k = 0; k < 6; k++) {
+    const out = [pts[0]], amp = rough / Math.pow(1.85, k);
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      out.push([(a[0] + b[0]) / 2 + (r() - 0.5) * (b[0] - a[0]) * 0.22, (a[1] + b[1]) / 2 + (r() - 0.5) * amp], b);
+    }
+    pts = out;
+  }
+  return pts;
+}
+// the y of a polyline at x
+function lineY(pts, x) {
+  for (let i = 1; i < pts.length; i++) if (pts[i][0] >= x) { const a = pts[i - 1], b = pts[i]; return lerp(a[1], b[1], (x - a[0]) / Math.max(1, b[0] - a[0])); }
+  return pts[pts.length - 1][1];
+}
+// the summits: points higher than everything within `reach` px either side
+function summits(pts, reach = 70, minH = 30, base = H) {
+  const out = [];
+  for (let i = 1; i < pts.length - 1; i++) {
+    let top = true;
+    for (let j = 0; j < pts.length; j++) if (j !== i && Math.abs(pts[j][0] - pts[i][0]) < reach && pts[j][1] < pts[i][1]) { top = false; break; }
+    if (top && base - pts[i][1] > minH) out.push(i);
+  }
+  return out;
+}
+
+// A painted mountain range. pal: { rock, rockLt, rockDk, shade, snow, snowSh, haze }, L: light ({lx, ly}),
+// o: { base (y of the foot), snowLine (y above which snow lies), seed, ink (line colour or null), hazeA, strata }
+function alpine(g, ridge, pal, L, o) {
+  const base = o.base, r = RNG(o.seed || 1), lightLeft = L.lx < 0;
+  const body = [[ridge[0][0], base + 40], ...ridge, [ridge[ridge.length - 1][0], base + 40]];
+  const tops = summits(ridge, o.reach ?? 70, 30, base);
+  // 1. rock: the lit colour, worked with strokes that follow the fall line
+  paintRegion(g, body, pal.rock, r, {
+    size: o.size ?? 26, dens: 1.1, a: 0.32, stretch: 1.6, angVar: 0.5, ang: Math.PI / 2 * 0.85,
+    colAt: (x, y, rr) => jit(rr() < 0.5 ? pal.rockLt : pal.rock, rr, 12), dry: 0.35,
+  });
+  g.save(); path(g, body); g.clip();
+  // 2. strata: long dry-brush ledges, slightly tilted (the Front Ranges are layered limestone)
+  if (o.strata !== false) {
+    const tilt = o.tilt ?? -0.12;
+    for (let i = 0; i < (o.strataN ?? 70); i++) {
+      const x = lerp(ridge[0][0], ridge[ridge.length - 1][0], r()), top = lineY(ridge, x), y = lerp(top + 12, base, Math.pow(r(), 0.8));
+      bristle(g, x, y, 60 + r() * 160, 5 + r() * 6, tilt + (r() - 0.5) * 0.06, r() < 0.55 ? pal.rockDk : pal.rockLt, 0.3, r, 5);
+    }
+  }
+  // 3. snow: above the snow line, thicker on gentle ground, ending in a torn edge; couloirs run down from it
+  if (o.snowLine != null) {
+    const sl = o.snowLine;
+    const snowPts = [[ridge[0][0], -10]];
+    for (let x = ridge[0][0]; x <= ridge[ridge.length - 1][0]; x += 12) snowPts.push([x, -10]);
+    const edge = [];
+    for (let x = ridge[ridge.length - 1][0]; x >= ridge[0][0]; x -= 10) edge.push([x, sl + 26 * n1(x / 37, o.seed) + 14 * n1(x / 11, o.seed + 3)]);
+    paintRegion(g, snowPts.concat(edge), pal.snow, r, { size: 18, dens: 1.2, a: 0.35, stretch: 1.4, ang: 0.9, angVar: 1.2, colAt: (x, y, rr) => jit(rr() < 0.6 ? pal.snow : pal.snowSh, rr, 8) });
+    for (const i of tops) {
+      const p = ridge[i];
+      if (p[1] > sl + 40) continue;
+      for (let k = 0; k < 5 + r() * 5; k++) {
+        const sx = p[0] + (r() - 0.5) * 120, sy = Math.max(p[1] + 20, sl - 10 + r() * 40), len = 60 + r() * 160;
+        bristle(g, sx, sy + len / 2, len, 6 + r() * 8, Math.PI / 2 + (r() - 0.5) * 0.5, pal.snow, 0.55, r, 4);
+      }
+    }
+  }
+  // 4. the faces turned from the light: from each summit along the ridge to the next hollow, then down a diagonal spine
+  for (let n = 0; n < tops.length; n++) {
+    const a = tops[n], b = lightLeft ? (tops[n + 1] ?? ridge.length - 1) : (tops[n - 1] ?? 0), st = a < b ? 1 : -1;
+    let lo = a; for (let k = a; k !== b; k += st) if (ridge[k][1] > ridge[lo][1]) lo = k;
+    // the shaded side of the peak is a pyramid face: from the summit along the ridge to the hollow, then out and down
+    // to the foot, widening as it goes; its inner edge (the ridge line facing us) runs down from the summit at a slant
+    const span = ridge[lo][0] - ridge[a][0], hgt = base - ridge[a][1], dir = Math.sign(span || (lightLeft ? 1 : -1));
+    const face = [];
+    for (let k = a; k !== lo + st; k += st) face.push(ridge[k]);
+    face.push([ridge[lo][0] + dir * hgt * 0.35, base + 40]);
+    const spineX = ridge[a][0] + dir * hgt * (0.12 + 0.1 * r());
+    face.push([spineX, base + 40]);
+    // the spine wanders a little on its way down
+    face.push([lerp(ridge[a][0], spineX, 0.55) - dir * hgt * 0.04, lerp(ridge[a][1], base, 0.55)]);
+    if (face.length < 4) continue;
+    paintRegion(g, face, pal.shade, r, { size: 22, dens: 1.0, a: 0.3, stretch: 1.5, ang: Math.PI / 2 * 0.8, angVar: 0.6, colAt: (x, y, rr) => jit(rr() < 0.7 ? pal.shade : pal.rockDk, rr, 10), dry: 0.3 });
+    // a lit rim along the ridge on the sunny side of the summit
+    ink(g, densify([ridge[Math.max(0, a - 3 * st)], ridge[a]], false, 6), 3, { col: css(pal.rockLt), a: 0.55, t0: 0.4, t1: 0.1, seed: a });
+  }
+  // 5. haze rising from the valley
+  const hz = g.createLinearGradient(0, base - (o.hazeH ?? 260), 0, base + 30);
+  hz.addColorStop(0, css(pal.haze, 0)); hz.addColorStop(1, css(pal.haze, o.hazeA ?? 0.55));
+  g.fillStyle = hz; g.fillRect(ridge[0][0], base - (o.hazeH ?? 260), ridge[ridge.length - 1][0] - ridge[0][0], (o.hazeH ?? 260) + 80);
+  g.restore();
+  // 6. a broken ink edge on the nearer ranges only
+  if (o.ink) {
+    for (let s = 0; s < ridge.length - 6; s += 5 + Math.floor(r() * 6)) {
+      const seg2 = ridge.slice(s, s + 4 + Math.floor(r() * 8));
+      if (seg2.length > 2 && r() < 0.75) ink(g, seg2, o.inkW ?? 2.2, { col: o.ink, a: o.inkA ?? 0.55, seed: s, t0: 0.3, t1: 0.3, min: 0.1 });
+    }
+  }
+}
+
+// A spruce: drooping tiers, narrow at the top, lit on the sun's side; snow on the tiers in winter.
+// pal: { dk, mid, lt, snow }, o: { snow (0..1), ink, seed, lean }
+function spruce(g, x, y, h, pal, L, r, o = {}) {
+  const tiers = Math.max(6, Math.round(h / 16)), lean = o.lean ?? 0, lit = L.lx < 0 ? -1 : 1;
+  // trunk
+  if (h > 60) { const tw = Math.max(2, h * 0.025); path(g, [[x - tw, y], [x + tw, y], [x + tw * 0.4 + lean * h, y - h * 0.9], [x - tw * 0.4 + lean * h, y - h * 0.9]]); g.fillStyle = css(mixv(pal.dk, '#2a1a12', 0.5)); g.fill(); }
+  const sil = [];
+  for (let k = 0; k < tiers; k++) {
+    const t = (k + 1) / tiers, ty = y - h + t * h * 0.9, cx = x + lean * h * (1 - t);
+    const w = h * (0.04 + 0.2 * Math.pow(t, 0.95)) * (0.75 + 0.45 * r()), drop = h * (0.035 + 0.03 * r());
+    const lw = w * (0.85 + 0.3 * r()), rw = w * (0.85 + 0.3 * r());
+    const tier = [[cx + (r() - 0.5) * 2, ty - h * 0.1]];
+    // the branch ends hang down, with a few ragged tips along the bottom
+    tier.push([cx - lw * 0.55, ty - h * 0.02], [cx - lw, ty + drop], [cx - lw * 0.82, ty + drop * 0.55]);
+    for (let j = 1; j < 5; j++) tier.push([cx - lw * 0.82 + lw * 1.64 * j / 5, ty + drop * (0.35 + 0.4 * r())]);
+    tier.push([cx + rw * 0.82, ty + drop * 0.55], [cx + rw, ty + drop], [cx + rw * 0.55, ty - h * 0.02]);
+    path(g, tier); g.fillStyle = css(jit(pal.dk, r, 6)); g.fill();
+    // the lit side: a lighter wedge worked with needle dabs
+    g.save(); path(g, tier); g.clip();
+    for (let d = 0; d < Math.max(3, w * 0.5); d++) {
+      const u = r(), px = cx + lit * lw * (0.15 + 0.8 * u), py = ty - h * 0.04 + drop * u * 0.9 + (r() - 0.5) * drop;
+      dab(g, px, py, Math.max(3, w * 0.35), Math.max(1.5, w * 0.1), lit < 0 ? 2.6 + (r() - 0.5) * 0.4 : 0.5 + (r() - 0.5) * 0.4, jit(r() < 0.6 ? pal.mid : pal.lt, r, 10), 0.75, r);
+    }
+    if (o.snow > 0.05) {
+      for (let d = 0; d < Math.max(2, w * 0.25); d++) {
+        const u = r(), px = cx + (r() - 0.5) * (lw + rw) * 0.8, py = ty - h * 0.03 + drop * 0.25 * u;
+        dab(g, px, py, Math.max(3, w * 0.4), Math.max(1.5, w * 0.12), (r() - 0.5) * 0.3, jit(pal.snow, r, 6), 0.85 * o.snow, r);
+      }
+    }
+    g.restore();
+    sil.push(tier);
+  }
+  if (o.ink && h > 80) for (const tier of sil) ink(g, tier.slice(1, -1), Math.max(1, h * 0.006), { col: o.ink, a: 0.5, seed: Math.floor(x + y), t0: 0.3, t1: 0.3, min: 0.2 });
+}
+// a band of distant forest: many small spruce spikes along a line, darker at the foot
+function forestBand(g, x0, x1, yAt, n, hMin, hMax, pal, L, r, o = {}) {
+  const trees = [];
+  for (let i = 0; i < n; i++) { const x = lerp(x0, x1, (i + r()) / n); trees.push([x, yAt(x) + r() * (o.depth ?? 8), lerp(hMin, hMax, Math.pow(r(), 1.5))]); }
+  trees.sort((a, b) => a[1] - b[1]);
+  for (const [x, y, h] of trees) {
+    if (h < 26) { // far: one painted spike
+      path(g, [[x, y - h], [x - h * 0.22, y], [x + h * 0.22, y]]); g.fillStyle = css(jit(pal.dk, r, 8)); g.fill();
+      dab(g, x + (L.lx < 0 ? -1 : 1) * h * 0.07, y - h * 0.45, h * 0.5, h * 0.12, Math.PI / 2, jit(pal.mid, r, 8), 0.6, r);
+      if (o.snow > 0.05) dab(g, x, y - h * 0.7, h * 0.25, h * 0.08, 0, pal.snow, 0.6 * o.snow, r);
+    } else spruce(g, x, y, h, pal, L, r, { snow: o.snow });
+  }
+}
+
+// the lake: what is above the waterline, mirrored and darkened into the water colour, then worked with
+// horizontal strokes; frozen, it is snow-covered ice with only a faint gloss
+function lakePlate(g, above, wl, pal, r, o = {}) {
+  const h = H - wl;
+  g.save(); g.beginPath(); g.rect(0, wl, W, h); g.clip();
+  if (o.frozen) {
+    paintRegion(g, [[0, wl], [W, wl], [W, H], [0, H]], pal.ice, r, { size: 50, dens: 0.6, a: 0.25, stretch: 3, ang: 0, angVar: 0.08, colAt: (x, y, rr) => jit(rr() < 0.5 ? pal.ice : pal.iceSh, rr, 8) });
+  } else {
+    g.save(); g.translate(0, wl * 2); g.scale(1, -1); g.globalAlpha = 0.85; g.drawImage(above, 0, 0, W, H); g.restore();
+    const wg = g.createLinearGradient(0, wl, 0, H);
+    wg.addColorStop(0, css(pal.water, 0.35)); wg.addColorStop(1, css(pal.waterDk, 0.75));
+    g.fillStyle = wg; g.fillRect(0, wl, W, h);
+    // painted ripples: long horizontal strokes, longer and further apart nearer the viewer
+    for (let i = 0; i < 520; i++) {
+      const u = Math.pow(r(), 1.3), y = wl + 2 + u * h, len = 60 + u * 420 * r();
+      dab(g, r() * W, y, len, 1.5 + u * 5, (r() - 0.5) * 0.01, jit(r() < 0.5 ? pal.waterLt : pal.waterDk, r, 8), 0.12 + 0.2 * r(), r);
+    }
+  }
+  // a pale line where the water meets the far shore
+  for (let i = 0; i < 40; i++) dab(g, r() * W, wl + 1 + r() * 3, 80 + r() * 260, 2 + r() * 2, 0, pal.shoreLine, 0.4, r);
+  g.restore();
+}
+
+// a log cabin: inked cels, logs, a roof (snow on it in winter), chimney, warm windows at night
+function cabin(g, x, y, s, pal, L, o = {}) {
+  const k = s / 40, P2 = (pts) => pts.map(p => [x + p[0] * k, y + p[1] * k]);   // s: the cabin's half width in px
+  const LW = 2.2 * s / 40;
+  // walls
+  cels(g, P2([[-40, 0], [40, 0], [40, -34], [-40, -34]]), { base: pal.log, sh: pal.logSh, sw: 6 * s / 40, L, line: P.ink, lw: LW, seed: 61,
+    after: gg => { for (let i = 1; i < 6; i++) seam(gg, P2([[-40, -34 + i * 6], [40, -34 + i * 6]]), 1.2 * s / 40, pal.logSh, 70 + i, 0.8);
+      // windows
+      for (const wx of [-26, 14]) { const wp = P2([[wx, -24], [wx + 12, -24], [wx + 12, -12], [wx, -12]]); path(gg, wp); gg.fillStyle = css(o.glow > 0.05 ? mixv(pal.winOff, pal.winOn, o.glow) : pal.winOff); gg.fill(); seam(gg, P2([[wx + 6, -24], [wx + 6, -12]]), 1 * s / 40, P.ink, 80, 0.7); }
+      path(gg, P2([[-6, 0], [6, 0], [6, -20], [-6, -20]])); gg.fillStyle = css(pal.door); gg.fill(); } });
+  // chimney
+  cels(g, P2([[18, -44], [26, -44], [26, -62], [18, -62]]), { base: pal.stone, sh: pal.logSh, sw: 2, L, line: P.ink, lw: LW * 0.8, seed: 62 });
+  // roof
+  const roof = P2([[-48, -32], [0, -58], [48, -32], [44, -28], [0, -52], [-44, -28]]);
+  cels(g, roof, { base: pal.roof, sh: pal.roofSh, sw: 4 * s / 40, L, line: P.ink, lw: LW, seed: 63 });
+  if (o.snow > 0.1) { path(g, P2([[-48, -33], [0, -59], [48, -33], [40, -31], [0, -53], [-40, -31]])); g.fillStyle = css(pal.snow, o.snow); g.fill(); }
+  if (o.glow > 0.05) { const gl = g.createRadialGradient(x, y - 18 * s / 40, 0, x, y - 18 * s / 40, 90 * s / 40); gl.addColorStop(0, `rgba(255,190,110,${0.3 * o.glow})`); gl.addColorStop(1, 'rgba(255,190,110,0)'); g.fillStyle = gl; g.fillRect(x - 100 * s / 40, y - 110 * s / 40, 200 * s / 40, 160 * s / 40); }
+  return [x + 22 * k, y - 62 * k];   // the chimney's top, for the smoke
+}
+
+// ===== 10_live.js
+// ================= Alberta Live: painted Rockies scenes that follow the real sky and weather =================
+// S (the conditions): sunAlt (degrees), sunSide (-1 sun on the left of the view, 1 right), moonAlt, moonX (0..1 across),
+// moonPhase (0 new .. 0.5 full .. 1), cloud (0..1), rain, snow, fog, storm (0..1), wind (km/h), windDir (-1 left, 1 right),
+// temp (C), groundSnow (0..1), frozen (bool), aurora (0..1), season ('summer' | 'autumn' | 'winter' | 'spring').
+// Plates (the painting) are made once per conditions; draw() adds what moves.
+
+const Q = new URLSearchParams(location.search);
+const qn = (k, d) => Q.has(k) ? +Q.get(k) : d;
+function condFromQuery() {
+  return {
+    sunAlt: qn('alt', 20), sunSide: qn('side', -1), moonAlt: qn('malt', 25), moonX: qn('mx', 0.7), moonPhase: qn('phase', 0.5),
+    cloud: qn('cloud', 0.3), rain: qn('rain', 0), snow: qn('snow', 0), fog: qn('fog', 0), storm: qn('storm', 0),
+    wind: qn('wind', 12), windDir: qn('wdir', 1), temp: qn('temp', 8), groundSnow: qn('gsnow', 0), frozen: qn('frozen', 0) > 0.5,
+    aurora: qn('aurora', 0), season: Q.get('season') || 'summer', loc: Q.get('loc') || 'moraine',
+  };
+}
+
+// ---------- colour, by the sun's height (keys between which everything is mixed) ----------
+const SKY_KEYS = [
+  { alt: -18, top: '#070c22', mid: '#14204a', hor: '#26386a', glow: '#26386a' },
+  { alt: -8, top: '#111a46', mid: '#2e3874', hor: '#7a5f8e', glow: '#a5708a' },
+  { alt: -2, top: '#253a78', mid: '#8a6a98', hor: '#f0a070', glow: '#ff9a5c' },
+  { alt: 3, top: '#3d5e9c', mid: '#c48a94', hor: '#ffc98a', glow: '#ffb46a' },
+  { alt: 10, top: '#4a7ab8', mid: '#9dbcdc', hor: '#f4dcae', glow: '#fff0c8' },
+  { alt: 30, top: '#4683c6', mid: '#8cb9e0', hor: '#e2ecf0', glow: '#ffffff' },
+];
+const LAND_KEYS = [
+  { alt: -18, rock: '#3b4366', rockLt: '#56618c', rockDk: '#262c48', shade: '#20263f', snow: '#a9b6e4', snowSh: '#5f6ba0', tree: '#0c1424', treeMid: '#18243a', treeLt: '#2a3a58', water: '#13284a', waterLt: '#3a5a8a', waterDk: '#0a162c', grass: '#1a2438' },
+  { alt: -6, rock: '#5a5280', rockLt: '#7d6c9c', rockDk: '#35304f', shade: '#2e2a4a', snow: '#c8b8e4', snowSh: '#7a70a8', tree: '#141a2c', treeMid: '#232a42', treeLt: '#3a3c5c', water: '#2a3a6a', waterLt: '#7a78a8', waterDk: '#141c3a', grass: '#2a2a40' },
+  { alt: 1, rock: '#c08578', rockLt: '#f2ad92', rockDk: '#6c4c5c', shade: '#4c3f6c', snow: '#ffd2c0', snowSh: '#9a88b8', tree: '#1c2230', treeMid: '#33343e', treeLt: '#8a6658', water: '#3c5a86', waterLt: '#e8a88a', waterDk: '#1c2a4a', grass: '#4a4038' },
+  { alt: 8, rock: '#b4a08c', rockLt: '#e8cfae', rockDk: '#6e6460', shade: '#5a5f82', snow: '#fff1e0', snowSh: '#aab4d0', tree: '#1e3428', treeMid: '#36513a', treeLt: '#7c8a52', water: '#2f8ea4', waterLt: '#9ad4d8', waterDk: '#1a5468', grass: '#6a7a40' },
+  { alt: 30, rock: '#9c978e', rockLt: '#cfc8b8', rockDk: '#66646a', shade: '#5c6684', snow: '#f6f8fc', snowSh: '#b6c2dc', tree: '#1c3628', treeMid: '#33553c', treeLt: '#5e8350', water: '#2aa0b2', waterLt: '#8fdcdc', waterDk: '#155f72', grass: '#5e8040' },
+];
+function keyed(keys, alt) {
+  let i = 0; while (i < keys.length - 1 && alt > keys[i + 1].alt) i++;
+  const a = keys[i], b = keys[Math.min(i + 1, keys.length - 1)], t = a === b ? 0 : sstep(clamp((alt - a.alt) / (b.alt - a.alt)));
+  const o = {}; for (const k in a) if (k !== 'alt') o[k] = mixv(a[k], b[k], t); return o;
+}
+function paletteFor(S) {
+  const sky = keyed(SKY_KEYS, S.sunAlt), land = keyed(LAND_KEYS, S.sunAlt);
+  // cloud cover and weather: towards grey, darker in rain, paler in snow and fog
+  const ov = clamp((S.cloud - 0.55) / 0.45) * 0.8 + S.fog * 0.3, dark = clamp(S.sunAlt < -6 ? 1 : 0);
+  const greyOf = c => { const l = c[0] * 0.3 + c[1] * 0.59 + c[2] * 0.11; return [l, l, l * 1.04]; };
+  for (const P0 of [sky, land]) for (const k in P0) {
+    let c = mixv(P0[k], greyOf(P0[k]), Math.min(0.85, ov));
+    if (S.rain > 0) c = mixv(c, [0, 0, 0], S.rain * 0.18 + S.storm * 0.2);
+    if (S.snow > 0 || S.fog > 0) c = mixv(c, [215, 220, 230], (S.snow * 0.25 + S.fog * 0.35) * (1 - dark * 0.7));
+    P0[k] = c;
+  }
+  // autumn larches and grass go gold; winter trees darker and snowier
+  if (S.season === 'autumn') { land.treeLt = mixv(land.treeLt, '#c89a3a', 0.45); land.grass = mixv(land.grass, '#b08a40', 0.6); }
+  land.haze = sky.hor; land.ice = mixv(land.snow, sky.hor, 0.25); land.iceSh = mixv(land.snowSh, land.shade, 0.3);
+  land.shoreLine = mixv(sky.hor, '#ffffff', 0.3);
+  land.log = mixv('#8a5a36', land.rockDk, 0.25 + 0.6 * dark); land.logSh = mixv('#5a3a24', land.shade, 0.3 + 0.5 * dark);
+  land.roof = mixv('#8a3a2c', land.shade, 0.2 + 0.6 * dark); land.roofSh = mixv('#5a2420', land.shade, 0.4 + 0.5 * dark);
+  land.stone = mixv('#7a7470', land.rockDk, 0.3 + 0.5 * dark); land.door = mixv('#4a2c1c', land.shade, 0.5);
+  land.winOff = mixv('#3a3a40', land.shade, 0.4); land.winOn = [255, 196, 110];
+  return { sky, land, ov, dark };
+}
+function lightFor(S) { return { lx: S.sunAlt > -4 ? 0.62 * S.sunSide : -0.5, ly: -0.78 }; }
+
+// ---------- the locations: each lays out its ranges, shores and near trees ----------
+const LOC = {};
+LOC.moraine = {
+  name: 'Moraine Lake', wl: 702,
+  back: [[-80, 560], [200, 500], [420, 470], [700, 455], [1000, 470], [1300, 450], [1600, 490], [2000, 540]],
+  // the wall of peaks: its tallest spires rise into the bottom of the clock's digits
+  wall: [[-80, 600], [60, 500], [170, 455], [290, 500], [400, 410], [520, 468], [630, 372], [740, 425], [860, 352], [960, 410], [1070, 365], [1170, 420], [1280, 378], [1390, 445], [1500, 410], [1620, 480], [1760, 450], [1900, 530], [2000, 570]],
+  left: [[-80, 400], [80, 430], [240, 520], [400, 610], [560, 690], [700, 712]],
+  right: [[1220, 712], [1380, 640], [1560, 560], [1760, 500], [2000, 470]],
+  heroes: [[70, 990, 820, -0.01], [205, 1010, 640, 0.01], [-10, 1040, 700, 0], [1770, 990, 800, 0.01], [1895, 1030, 900, -0.01], [1650, 1000, 520, 0]],
+  cabin: null,
+};
+LOC.rundle = {
+  name: 'Mount Rundle', wl: 712,
+  back: [[-80, 600], [300, 560], [700, 590], [1100, 560], [1500, 520], [2000, 560]],
+  // the tilted slab: a long ramp up to the summit, then a cliff
+  wall: [[-80, 690], [200, 670], [420, 620], [640, 560], [820, 500], [980, 445], [1120, 395], [1200, 372], [1250, 380], [1300, 470], [1360, 560], [1440, 610], [1600, 600], [1800, 640], [2000, 660]],
+  left: [[-80, 560], [120, 600], [300, 660], [480, 712], [600, 722]],
+  right: [[1380, 722], [1520, 690], [1700, 640], [2000, 600]],
+  heroes: [[60, 1000, 760, 0], [190, 1020, 580, 0.01], [1800, 1000, 780, -0.01], [1900, 1040, 640, 0]],
+  cabin: null, tilt: -0.32,
+};
+LOC.peyto = {
+  name: 'Peyto Lake', wl: 812, high: true,
+  back: [[-80, 470], [250, 430], [600, 455], [960, 420], [1300, 440], [1650, 410], [2000, 450]],
+  wall: [[-80, 520], [120, 440], [300, 380], [430, 345], [560, 400], [700, 470], [860, 520], [1000, 540], [1150, 505], [1290, 430], [1420, 380], [1560, 410], [1720, 470], [2000, 500]],
+  left: [[-80, 520], [150, 600], [380, 700], [600, 800], [760, 830]],
+  right: [[1150, 830], [1350, 760], [1600, 680], [1800, 640], [2000, 620]],
+  heroes: [[80, 1010, 780, 0], [220, 1030, 600, 0], [1790, 1010, 800, 0], [1910, 1040, 700, 0]],
+  cabin: null,
+};
+LOC.cabin = {
+  name: 'Kananaskis cabin', wl: 760,
+  back: [[-80, 540], [300, 500], [640, 470], [960, 500], [1280, 460], [1650, 500], [2000, 530]],
+  // three peaks in a row, like the Three Sisters
+  wall: [[-80, 640], [200, 600], [480, 520], [640, 410], [740, 470], [860, 395], [960, 455], [1080, 380], [1200, 470], [1400, 560], [1700, 600], [2000, 640]],
+  left: [[-80, 620], [240, 680], [520, 740], [800, 770]],
+  right: [[1100, 770], [1400, 720], [1700, 660], [2000, 640]],
+  heroes: [[60, 1000, 820, 0], [200, 1015, 640, 0], [1790, 1000, 820, 0], [1910, 1030, 700, 0], [1640, 990, 480, 0]],
+  cabin: [1290, 840, 2.2], meadow: true,
+};
+
+// ---------- painting the plates ----------
+function makeScene(S) {
+  const loc = LOC[S.loc] || LOC.moraine, PAL = paletteFor(S), L = lightFor(S), r = RNG(1234);
+  const sky = PAL.sky, land = PAL.land, wl = loc.wl;
+  const plates = { loc, PAL, L };
+  // sky: painted strokes over a wash, a warm glow where the sun is or just set
+  plates.sky = makePlate(0, 0, W, H, 1, g => {
+    paintSky(g, W, H, [[0, sky.top], [wl * 0.6, sky.mid], [wl, sky.hor], [H, sky.hor]], RNG(3), { n: 2600 });
+    if (S.sunAlt > -10 && S.sunAlt < 25) {
+      const sx = W * (0.5 + 0.42 * S.sunSide), sy = wl - 60 - Math.max(-2, S.sunAlt) * 18;
+      const gl = g.createRadialGradient(sx, sy, 0, sx, sy, 900);
+      const k = clamp(1 - Math.abs(S.sunAlt - 1) / 14) * (1 - PAL.ov * 0.8);
+      gl.addColorStop(0, css(sky.glow, 0.55 * k)); gl.addColorStop(1, css(sky.glow, 0));
+      g.fillStyle = gl; g.fillRect(0, 0, W, H);
+    }
+    paperOver(g, W, H, 0.3);
+  });
+  // land: back range, the wall, the side slopes with their forests, the far shore's trees
+  const back = ridgeLine(loc.back, 21, 40), wall = ridgeLine(loc.wall, 22, 55);
+  const snowFrac = S.season === 'winter' ? 0.0 : S.season === 'summer' ? 0.65 : 0.45;
+  const yTop = Math.min(...wall.map(p => p[1]));
+  const snowLine = lerp(yTop, wl, S.season === 'winter' ? 0.92 : snowFrac * 0.62) + (S.season === 'winter' ? 0 : 0) - S.groundSnow * 60;
+  const tree = { dk: land.tree, mid: land.treeMid, lt: land.treeLt, snow: land.snow };
+  plates.land = makePlate(0, 0, W, H, 1, g => {
+    const hazeBack = mixv(land.haze, land.shade, 0.15);
+    alpine(g, back, { rock: mixv(land.rock, hazeBack, 0.6), rockLt: mixv(land.rockLt, hazeBack, 0.55), rockDk: mixv(land.rockDk, hazeBack, 0.6), shade: mixv(land.shade, hazeBack, 0.55), snow: mixv(land.snow, hazeBack, 0.4), snowSh: mixv(land.snowSh, hazeBack, 0.45), haze: hazeBack }, L,
+      { base: wl, snowLine: snowLine + 30, seed: 5, strataN: 30, hazeA: 0.75, hazeH: 200, size: 30 });
+    alpine(g, wall, { rock: land.rock, rockLt: land.rockLt, rockDk: land.rockDk, shade: land.shade, snow: land.snow, snowSh: land.snowSh, haze: mixv(land.haze, land.shade, 0.1) }, L,
+      { base: wl, snowLine, seed: 9, strataN: 120, tilt: loc.tilt ?? -0.1, hazeA: 0.5, hazeH: 160, ink: css(mixv(land.rockDk, '#000000', 0.3)), inkA: 0.35, inkW: 2 });
+    // the side slopes: scree and rock on the left, forest climbing the right
+    const leftR = ridgeLine(loc.left, 31, 30), rightR = ridgeLine(loc.right, 32, 30);
+    alpine(g, leftR, { rock: mixv(land.rock, land.rockDk, 0.2), rockLt: land.rockLt, rockDk: land.rockDk, shade: land.shade, snow: land.snow, snowSh: land.snowSh, haze: land.haze }, L,
+      { base: wl + 20, snowLine: S.groundSnow > 0.3 ? 0 : null, seed: 13, strataN: 40, hazeA: 0.25, hazeH: 120, reach: 140, ink: css(land.rockDk), inkA: 0.3 });
+    path(g, [...rightR, [W + 80, H], [rightR[0][0], H]]); g.fillStyle = css(mixv(land.tree, land.haze, 0.15)); g.fill();
+    forestBand(g, rightR[0][0], W + 40, x => lineY(rightR, x) + 6, 110, 16, 46, { dk: mixv(land.tree, land.haze, 0.12), mid: mixv(land.treeMid, land.haze, 0.1), lt: land.treeLt, snow: land.snow }, L, RNG(41), { snow: S.groundSnow, depth: 30 });
+    forestBand(g, rightR[0][0] + 60, W + 40, x => lineY(rightR, x) + 70, 70, 26, 70, tree, L, RNG(42), { snow: S.groundSnow, depth: 60 });
+    // the far shore: a line of small spruces along the water
+    forestBand(g, -40, W + 40, x => wl + 2, 260, 10, 30, { dk: mixv(land.tree, land.haze, 0.25), mid: mixv(land.treeMid, land.haze, 0.2), lt: land.treeLt, snow: land.snow }, L, RNG(43), { snow: S.groundSnow, depth: 4 });
+    forestBand(g, -40, leftR[leftR.length - 1][0], x => Math.min(lineY(leftR, x) + 30, wl + 6), 40, 20, 60, tree, L, RNG(44), { snow: S.groundSnow, depth: 30 });
+  });
+  // the lake: a mirror of sky and land
+  const above = mk(W, H), ag = above.getContext('2d'); ag.drawImage(plates.sky.c, 0, 0); ag.drawImage(plates.land.c, 0, 0);
+  plates.lake = makePlate(0, 0, W, H, 1, g => lakePlate(g, above, wl, land, RNG(51), { frozen: S.frozen }));
+  // near: the framing spruces, rocks and grass at the shore, the cabin
+  plates.near = makePlate(0, 0, W, H, 1, g => {
+    const nearTree = { dk: mixv(land.tree, '#000000', 0.25), mid: land.tree, lt: land.treeMid, snow: land.snow };
+    const r2 = RNG(61);
+    // banks in the corners
+    const bankCol = S.groundSnow > 0.3 ? mixv(land.snow, land.shade, 0.25) : mixv(land.grass, land.tree, 0.4);
+    paintRegion(g, [[-20, H + 20], [-20, 900], [160, 880], [340, 930], [520, 1010], [620, H + 20]], bankCol, r2, { size: 22, dens: 1.2, a: 0.35, colAt: (x, y, rr) => jit(rr() < 0.5 ? bankCol : mixv(bankCol, land.rockDk, 0.3), rr, 12) });
+    paintRegion(g, [[W + 20, H + 20], [W + 20, 880], [1760, 870], [1560, 930], [1380, 1010], [1280, H + 20]], bankCol, r2, { size: 22, dens: 1.2, a: 0.35, colAt: (x, y, rr) => jit(rr() < 0.5 ? bankCol : mixv(bankCol, land.rockDk, 0.3), rr, 12) });
+    // boulders at the water's edge
+    for (const [bx, by, bs] of [[420, 1000, 44], [520, 1040, 30], [1430, 1000, 50], [1330, 1045, 28], [300, 960, 34]]) {
+      const pts = rough(scallop(bx, by, bs, bx, 5, 0.55).filter(p => p[1] <= by + bs * 0.2), 2, bx, 6);
+      cels(g, pts, { base: mixv(land.rock, land.rockDk, 0.3), sh: land.shade, sw: bs * 0.3, rim: land.rockLt, rw: 3, L, line: P.ink, lw: 2, seed: bx });
+    }
+    if (loc.cabin) {   // the cabin's clearing: a grassy (or snowy) point running out into the lake
+      const [cx, cy] = loc.cabin;
+      const clearing = [[cx - 360, cy + 12], [cx - 200, cy - 6], [cx + 40, cy - 14], [cx + 300, cy - 18], [W + 20, cy - 30], [W + 20, H + 20], [cx - 80, H + 20], [cx - 260, cy + 110]];
+      paintRegion(g, rough(clearing, 6, 5, 10), bankCol, r2, { size: 20, dens: 1.3, a: 0.35, colAt: (x, y, rr) => jit(rr() < 0.5 ? bankCol : mixv(bankCol, land.treeLt, 0.35), rr, 12) });
+      forestBand(g, cx + 90, W + 20, x => cy - 22 + (x - cx) * -0.02, 18, 60, 160, nearTree, L, RNG(66), { snow: S.groundSnow, depth: 10 });
+    }
+    if (loc.cabin) plates.chimney = cabin(g, loc.cabin[0], loc.cabin[1], loc.cabin[2] * 40, land, L, { glow: clamp((2 - S.sunAlt) / 6), snow: S.groundSnow });
+    for (const [x, y, h, lean] of loc.heroes) spruce(g, x, y, h, nearTree, L, RNG(Math.floor(x * 3 + h)), { snow: S.groundSnow, lean, ink: css(P.inkCool) });
+    paperOver(g, W, H, 0.28);
+  });
+  // clouds: lit cumulus in the sky's light, as many as the cover says
+  plates.clouds = [];
+  const cpal = { sh: mixv(sky.mid, land.shade, 0.35), mid: mixv(sky.hor, '#ffffff', 0.25 * (1 - PAL.dark)), lit: mixv(mixv(sky.glow, '#ffffff', 0.5), sky.hor, PAL.dark), hi: mixv(sky.glow, '#ffffff', 0.7 - PAL.dark * 0.6), base: mixv(sky.mid, land.shade, 0.5) };
+  const overcast = S.cloud > 0.75 || S.rain > 0 || S.snow > 0;
+  const nC = overcast ? 0 : Math.round(S.cloud * 7), cr = RNG(71);
+  if (overcast) plates.ceiling = makePlate(0, 0, W, wl, 1, g => {
+    const rr = RNG(73), body = mixv(sky.mid, land.shade, 0.25), lit = mixv(sky.hor, '#ffffff', 0.2 * (1 - PAL.dark));
+    for (let i = 0; i < 9; i++) stratus(g, rr() * W, 60 + rr() * wl * 0.55, 700 + rr() * 900, 60 + rr() * 70, body, lit, rr, { litA: 0.35 });
+  });
+  for (let i = 0; i < nC; i++) {
+    const w = 380 + cr() * 520, h = w * 0.36, pl = makePlate(-w * 0.6, -h * 1.8, w * 1.2, h * 2.4, 0.5, g => cumulus(g, 0, 0, w, h, cpal, RNG(80 + i), { lx: L.lx, ly: L.ly }));
+    plates.clouds.push({ pl, x: cr() * (W + 800) - 400, y: 90 + cr() * (wl * 0.42), speed: 0.5 + cr() * 0.8, w });
+  }
+  return plates;
+}
+
+// ---------- what moves ----------
+function drawLive(g, t, S, PL) {
+  const { loc, PAL, L } = PL, wl = loc.wl;
+  plateDraw(g, PL.sky);
+  // stars and the Milky Way on clear nights
+  const clear = (1 - clamp((S.cloud - 0.2) / 0.6)) * (1 - S.fog), night = clamp((-S.sunAlt - 6) / 8);
+  if (night * clear > 0.02) {
+    const a = night * clear;
+    for (let i = 0; i < 380; i++) {
+      const x = hash(i, 1) * W, y = Math.pow(hash(i, 2), 1.5) * wl * 0.9, tw = 0.55 + 0.45 * Math.sin(t * (0.6 + hash(i, 3) * 2) + i);
+      g.fillStyle = `rgba(240,242,255,${(a * tw * (0.3 + 0.7 * hash(i, 4))).toFixed(3)})`; const s = hash(i, 5) < 0.06 ? 2.4 : 1.4; g.fillRect(x, y, s, s);
+    }
+  }
+  if (S.aurora > 0.02 && night > 0.3) aurora(g, t, S.aurora * clear * night, wl);
+  if (S.moonAlt > 0) moon(g, S, PAL, wl);
+  // clouds drift with the wind
+  for (const c of PL.clouds) {
+    const span = W + c.w * 2, x = ((c.x + S.windDir * t * (4 + S.wind * 0.8) * c.speed) % span + span) % span - c.w;
+    g.globalAlpha = 0.95; plateDraw(g, { ...c.pl, ox: c.pl.ox + x, oy: c.pl.oy + c.y }); g.globalAlpha = 1;
+  }
+  if (PL.ceiling) { g.globalAlpha = 0.8; plateDraw(g, { ...PL.ceiling, ox: ((S.windDir * t * (3 + S.wind * 0.4)) % 300) - 150 }); g.globalAlpha = 1; }
+  if (PAL.ov > 0.25) { const og = g.createLinearGradient(0, 0, 0, wl); og.addColorStop(0, css(mixv(PAL.sky.top, [150, 155, 165], 0.5), PAL.ov * 0.6)); og.addColorStop(1, css(PAL.sky.hor, 0)); g.fillStyle = og; g.fillRect(0, 0, W, wl); }
+  plateDraw(g, PL.land);
+  plateDraw(g, PL.lake);
+  // glints on the water under the moon or a low sun
+  if (!S.frozen) {
+    const sunLow = S.sunAlt > -1 && S.sunAlt < 20, gx = sunLow ? W * (0.5 + 0.42 * S.sunSide) : W * S.moonX;
+    const ga = (sunLow ? clamp(1 - S.sunAlt / 20) : S.moonAlt > 0 ? clamp(S.moonPhase < 0.5 ? S.moonPhase * 2 : (1 - S.moonPhase) * 2) * night : 0) * (1 - PAL.ov);
+    if (ga > 0.05) for (let k = 0; k < 34; k++) {
+      const u = k / 34, y = wl + 6 + Math.pow(u, 1.4) * (H - wl - 10), w = 10 + u * 70, x = gx + Math.sin(t * 0.8 + k * 1.7) * w * 0.4 + (hash(k, 9) - 0.5) * w;
+      g.fillStyle = css(sunLow ? mixv(PAL.sky.glow, '#ffffff', 0.4) : [232, 236, 255], ga * (0.25 + 0.6 * (0.5 + 0.5 * Math.sin(t * 2 + k * 2.3))));
+      g.fillRect(x - w / 2, y, w, 1.5 + u * 2);
+    }
+  }
+  plateDraw(g, PL.near);
+  if (PL.chimney && (S.temp < 16 || night > 0.3)) smoke(g, t, PL.chimney, S, PAL);
+  weather(g, t, S, PAL, wl);
+}
+function moon(g, S, PAL, wl) {
+  const x = W * S.moonX, y = wl - 80 - S.moonAlt * 12, R = 34, vis = (1 - PAL.ov * 0.9) * (0.3 + 0.7 * clamp((-S.sunAlt + 2) / 10));
+  if (vis < 0.05) return;
+  const gl = g.createRadialGradient(x, y, 0, x, y, R * 6); gl.addColorStop(0, `rgba(220,228,255,${0.25 * vis})`); gl.addColorStop(1, 'rgba(220,228,255,0)'); g.fillStyle = gl; g.fillRect(x - R * 6, y - R * 6, R * 12, R * 12);
+  g.save(); g.globalAlpha = vis;
+  g.beginPath(); g.arc(x, y, R, 0, TAU); g.fillStyle = css(mixv(PAL.sky.mid, '#30344c', 0.4), 0.8); g.fill();
+  const ph = S.moonPhase, k = Math.cos(ph * TAU), waxing = ph < 0.5;
+  g.beginPath(); g.arc(x, y, R, -Math.PI / 2, Math.PI / 2, !waxing); g.ellipse(x, y, Math.abs(k) * R, R, 0, Math.PI / 2, -Math.PI / 2, (k > 0) === waxing); g.closePath();
+  g.fillStyle = '#f3f2ea'; g.fill();
+  // painted craters
+  const r = RNG(91); for (let i = 0; i < 6; i++) dab(g, x + (r() - 0.5) * R, y + (r() - 0.5) * R, R * 0.4, R * 0.18, r() * 3, '#c9c6c0', 0.35, r);
+  g.restore();
+}
+let AUR = null;
+function aurora(g, t, a, wl) {
+  const aw = 240, ah = 135; if (!AUR) AUR = mk(aw, ah);
+  const x = AUR.getContext('2d'); x.clearRect(0, 0, aw, ah);
+  for (let i = 0; i < aw; i++) {
+    const u = i / aw, base = ah * 0.56 + 7 * Math.sin(u * 6 + t * 0.05) + 4 * Math.sin(u * 15 - t * 0.08);
+    const I = a * (0.3 + 0.7 * Math.pow(0.5 + 0.5 * Math.sin(u * 9 + t * 0.07 + Math.sin(u * 3) * 2), 2)) * (0.85 + 0.15 * Math.sin(i * 0.7 + t * 0.4));
+    const h = ah * (0.28 + 0.18 * a) + 8 * Math.sin(u * 11 + t * 0.04);
+    const gr = x.createLinearGradient(0, base - h, 0, base + 2);
+    gr.addColorStop(0, 'rgba(160,90,255,0)'); gr.addColorStop(0.45, `rgba(140,110,255,${0.2 * I})`); gr.addColorStop(0.85, `rgba(70,255,170,${0.6 * I})`); gr.addColorStop(1, 'rgba(70,255,170,0)');
+    x.fillStyle = gr; x.fillRect(i, base - h, 1.6, h + 2);
+  }
+  g.save(); g.globalCompositeOperation = 'screen'; g.imageSmoothingQuality = 'high'; g.drawImage(AUR, 0, 0, W, wl * 1.25 * (ah / ah)); g.restore();
+}
+function smoke(g, t, ch, S, PAL) {
+  const col = mixv(mixv(PAL.sky.hor, '#e8e8ec', 0.5), '#3a3e50', PAL.dark * 0.6);
+  for (let i = 0; i < 26; i++) {
+    const age = ((t * 0.45 + i / 26) % 1), x = ch[0] + S.windDir * age * age * (40 + S.wind * 6) + 6 * n1(t * 0.6 + i, 4), y = ch[1] - age * 160, rr = 6 + age * 34;
+    g.fillStyle = css(col, 0.35 * (1 - age)); g.beginPath(); g.arc(x, y, rr, 0, TAU); g.fill();
+  }
+}
+function weather(g, t, S, PAL, wl) {
+  if (S.fog > 0) for (let i = 0; i < 5; i++) {
+    const y = wl - 60 + i * 50, x = ((t * (8 + i * 4) + i * 400) % (W + 1200)) - 600, fc = mixv(PAL.sky.hor, '#e6e8ee', 0.4);
+    const fg = g.createLinearGradient(0, y - 70, 0, y + 70); fg.addColorStop(0, css(fc, 0)); fg.addColorStop(0.5, css(fc, 0.5 * S.fog)); fg.addColorStop(1, css(fc, 0));
+    g.fillStyle = fg; g.fillRect(x - 600, y - 70, W + 1200, 140);
+  }
+  const lean = clamp(S.wind / 60, 0, 0.6) * S.windDir;
+  if (S.rain > 0) {
+    g.strokeStyle = css(mixv(PAL.sky.hor, '#dfe6f2', 0.6), 0.4); g.lineWidth = 1.6; g.beginPath();
+    for (let i = 0; i < 260 * S.rain; i++) { const z = 0.4 + hash(i, 7) * 0.6, y = ((hash(i, 8) * H + t * 1300 * z) % (H + 40)) - 20, x = ((hash(i, 9) * W + y * lean) % W + W) % W, len = 18 + 16 * z; g.moveTo(x, y); g.lineTo(x - lean * len, y - len); }
+    g.stroke();
+  }
+  if (S.snow > 0) for (let i = 0; i < 240 * S.snow; i++) {
+    const z = 0.4 + hash(i, 17) * 0.6, y = ((hash(i, 18) * H + t * (40 + 60 * z)) % (H + 20)) - 10, x = ((hash(i, 19) * W + Math.sin(t * 0.8 + i) * 16 + y * lean * 0.6) % W + W) % W;
+    g.fillStyle = `rgba(246,248,255,${(0.5 + 0.5 * z).toFixed(2)})`; g.beginPath(); g.arc(x, y, 1.4 + z * 2.6, 0, TAU); g.fill();
+  }
+  if (S.storm > 0) { const k = Math.max(0, Math.sin(t * 0.9) * Math.sin(t * 3.7)); if (k > 0.85) { g.fillStyle = `rgba(230,236,255,${(k - 0.85) * 3})`; g.fillRect(0, 0, W, H); } }
+}
+
+// ---------- the page: a still at ?t, or live ----------
+let COND = condFromQuery(), PLATES = null;
+function renderAt(t) {
+  const g = CTX; g.setTransform(SC, 0, 0, SC, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
+  if (!PLATES) PLATES = makeScene(COND);
+  drawLive(g, t, COND, PLATES);
+  g.save(); g.globalCompositeOperation = 'overlay'; g.globalAlpha = 0.14; g.fillStyle = g.createPattern(tooth(), 'repeat'); g.fillRect(0, 0, W, H); g.restore();
+  const v = g.createRadialGradient(W / 2, H / 2, H * 0.45, W / 2, H / 2, H * 1.1); v.addColorStop(0, 'rgba(6,10,14,0)'); v.addColorStop(1, 'rgba(6,10,14,0.28)'); g.fillStyle = v; g.fillRect(0, 0, W, H);
+}
+window.renderAt = renderAt;
+window.setConditions = c => { COND = Object.assign({}, COND, c); PLATES = null; };
+window.__ready = true;
+if (!Q.has('render') && !navigator.webdriver) {
+  if (Q.has('t')) renderAt(+Q.get('t'));
+  else { const t0 = performance.now(); (function loop() { renderAt((performance.now() - t0) / 1000); requestAnimationFrame(loop); })(); }
+}
+</script></body></html>
