@@ -1,0 +1,231 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Alberta Live 3D</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block;width:100vw;height:100vh}</style>
+<script type="importmap">{"imports":{"three":"./vendor/three/three.module.js"}}</script>
+</head><body><canvas id="c"></canvas>
+<script type="module">
+// Alberta Live in real 3D (three.js): flat-shaded Rockies, instanced spruce forests, a reflecting lake, a cabin,
+// and a camera that flies between the trees. Atmospheric fog in the sky's horizon colour turns every ridge into a
+// paler layer with distance, the layered-poster look, but in true depth. The conditions (sun, moon, cloud, rain,
+// snow, fog, wind, season) come from the address for now; the live version fills them from Calgary's real sky.
+// Every frame depends only on t (seeded noise, no Math.random), so a still at ?t= is exact.
+import * as THREE from 'three';
+import { Reflector } from './vendor/three/Reflector.js';
+
+const Q = new URLSearchParams(location.search), qn = (k, d) => Q.has(k) ? +Q.get(k) : d;
+const S = {
+  loc: Q.get('loc') || 'moraine', sunAlt: qn('alt', 20), sunAz: qn('az', 200), moonAlt: qn('malt', 25), moonAz: qn('maz', 230), phase: qn('phase', 0.5),
+  cloud: qn('cloud', 0.3), rain: qn('rain', 0), snow: qn('snow', 0), fog: qn('fog', 0), wind: qn('wind', 12), gsnow: qn('gsnow', 0),
+  frozen: qn('frozen', 0) > 0.5, aurora: qn('aurora', 0), season: Q.get('season') || 'summer',
+};
+const W = 1280, H = 720;
+
+// ---------- seeded noise ----------
+function hash(i, j, s = 0) { let h = Math.imul(i | 0, 374761393) ^ Math.imul(j | 0, 668265263) ^ Math.imul(s | 0, 0x9E3779B1); h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296; }
+function vnoise(x, y, s = 0) { const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j, u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+  return (hash(i, j, s) * (1 - u) + hash(i + 1, j, s) * u) * (1 - v) + (hash(i, j + 1, s) * (1 - u) + hash(i + 1, j + 1, s) * u) * v; }
+function ridged(x, y, s = 0, o = 6) { let a = 0, b = 0.5, f = 1; for (let k = 0; k < o; k++) { const n = 1 - Math.abs(vnoise(x * f, y * f, s + k) * 2 - 1); a += b * n * n; b *= 0.5; f *= 2.03; } return a; }
+function fbm(x, y, s = 0, o = 5) { let a = 0, b = 0.5, f = 1; for (let k = 0; k < o; k++) { a += b * vnoise(x * f, y * f, s + k); b *= 0.5; f *= 2.03; } return a; }
+function RNG(a) { return () => { a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v)), lerp = (a, b, t) => a + (b - a) * t, sstep = (a, b, v) => { const t = clamp((v - a) / (b - a)); return t * t * (3 - 2 * t); };
+
+// ---------- the locations (units: about 100 m) ----------
+// The camera looks along -z from near the origin. A lake fills the valley floor; peaks rise beyond it.
+const LOCS = {
+  moraine: { seed: 3, lake: { cx: 0, cz: -55, rx: 26, rz: 40 }, wallZ: -120, wallH: 42, rough: 1.0, sideH: 16, cabin: null },
+  rundle:  { seed: 7, lake: { cx: -6, cz: -50, rx: 34, rz: 30 }, wallZ: -125, wallH: 30, rough: 0.7, sideH: 10, slab: { x: 35, z: -120, h: 48 }, cabin: null },
+  peyto:   { seed: 11, lake: { cx: 8, cz: -80, rx: 14, rz: 46 }, wallZ: -150, wallH: 44, rough: 1.0, sideH: 26, camY: 22, cabin: null },
+  cabin:   { seed: 5, lake: { cx: 6, cz: -60, rx: 22, rz: 26 }, wallZ: -125, wallH: 38, rough: 0.9, sideH: 14, cabin: { x: 20, z: -36 } },
+};
+const LOC = LOCS[S.loc] || LOCS.moraine;
+const LAKE_Y = 0;
+function lakeD(x, z) { const L = LOC.lake, dx = (x - L.cx) / L.rx, dz = (z - L.cz) / L.rz; return 1 - Math.sqrt(dx * dx + dz * dz) + 0.08 * (vnoise(x * 0.15, z * 0.15, 9) - 0.5); }
+function height(x, z) {
+  const sd = LOC.seed;
+  let h = 1.5 + 4 * fbm(x * 0.03, z * 0.03, sd);
+  // the wall of peaks beyond the lake
+  const wz = sstep(LOC.wallZ + 45, LOC.wallZ - 10, z);
+  h += wz * LOC.wallH * (0.35 + 0.85 * ridged(x * 0.022 * LOC.rough, z * 0.03, sd + 3)) * (0.75 + 0.5 * fbm(x * 0.01, 0, sd + 5));
+  // a tilted slab like Mount Rundle
+  if (LOC.slab) { const s = LOC.slab, u = (x - s.x + 70) / 80, a = clamp(u) * (1 - sstep(0.96, 1.08, u)), across = sstep(30, 4, Math.abs(z - s.z + (x - s.x) * 0.25)); h = Math.max(h, s.h * Math.pow(a, 1.3) * across + 2); }
+  // the valley sides
+  h += LOC.sideH * sstep(18, 70, Math.abs(x - LOC.lake.cx)) * (0.6 + 0.6 * fbm(x * 0.04, z * 0.04, sd + 7));
+  // the lake's basin, and the ground the camera stands on kept low
+  const l = lakeD(x, z); h = lerp(h, LAKE_Y - 1.5, sstep(-0.15, 0.12, l));
+  return h;
+}
+
+// ---------- colour by the sun's height ----------
+const KEYS = [
+  { alt: -18, top: 0x050a24, hor: 0x2a4888, fog: 0x22407a, sun: 0x8fa8ff, sunI: 0.35, amb: 0x4a5aa0, ambI: 1.3, rock: 0x6a7ab0, grass: 0x2a3a62, tree: 0x1a2a4a, snow: 0xc8d4f8 },
+  { alt: -6, top: 0x161c50, hor: 0x9a6a9a, fog: 0x6a5a8c, sun: 0xff9aa0, sunI: 0.5, amb: 0x6a5a98, ambI: 1.2, rock: 0x8a7a9c, grass: 0x3a3a5a, tree: 0x24263e, snow: 0xe0d0f0 },
+  { alt: 1, top: 0x2c3a7a, hor: 0xf8a060, fog: 0xc88a7a, sun: 0xffa060, sunI: 1.4, amb: 0x8a6a8a, ambI: 0.8, rock: 0x9a8a84, grass: 0x4a4a30, tree: 0x1a2420, snow: 0xffe4d4 },
+  { alt: 10, top: 0x3c70c0, hor: 0xe8dcc0, fog: 0xb0c0cc, sun: 0xfff0d8, sunI: 2.2, amb: 0x8ab0d0, ambI: 0.9, rock: 0x9a958c, grass: 0x6a7a40, tree: 0x1e3a2a, snow: 0xffffff },
+  { alt: 35, top: 0x2f6fc6, hor: 0xd4e8f4, fog: 0xa8c4d8, sun: 0xffffff, sunI: 2.6, amb: 0x9ac0e0, ambI: 1.0, rock: 0x948f88, grass: 0x5a7a3c, tree: 0x1c3a28, snow: 0xffffff },
+];
+function pal() {
+  let i = 0; while (i < KEYS.length - 1 && S.sunAlt > KEYS[i + 1].alt) i++;
+  const a = KEYS[i], b = KEYS[Math.min(i + 1, KEYS.length - 1)], t = a === b ? 0 : sstep(a.alt, b.alt, S.sunAlt), o = {};
+  for (const k in a) { if (k === 'alt') continue; o[k] = typeof a[k] === 'number' && k.endsWith('I') ? lerp(a[k], b[k], t) : new THREE.Color(a[k]).lerp(new THREE.Color(b[k]), t); }
+  const ov = clamp((S.cloud - 0.5) / 0.5) * 0.8 + S.fog * 0.4, grey = c => { const l = c.r * 0.3 + c.g * 0.59 + c.b * 0.11; return new THREE.Color(l, l, l * 1.04); };
+  for (const k of ['top', 'hor', 'fog', 'sun', 'amb', 'rock', 'grass']) o[k].lerp(grey(o[k]), Math.min(0.8, ov));
+  if (S.rain) for (const k of ['top', 'hor', 'fog']) o[k].multiplyScalar(1 - 0.25 * S.rain);
+  o.sunI *= 1 - ov * 0.75; o.ov = ov;
+  return o;
+}
+const P = pal();
+const night = clamp((-S.sunAlt - 4) / 8);
+
+// ---------- the scene ----------
+const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('c'), antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1); renderer.setSize(W, H, false);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(P.fog, 0.0085 + S.fog * 0.02 + S.rain * 0.006 + S.snow * 0.008);
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.1, 900);
+
+// sky: a gradient dome with the sun and moon discs and stars
+const dirOf = (alt, az) => { const a = alt * Math.PI / 180, z = (az - 180) * Math.PI / 180; return new THREE.Vector3(Math.sin(z) * Math.cos(a), Math.sin(a), -Math.cos(z) * Math.cos(a)); };
+const sunDir = dirOf(S.sunAlt, S.sunAz), moonDir = dirOf(S.moonAlt, S.moonAz);
+const sky = new THREE.Mesh(new THREE.SphereGeometry(800, 32, 16), new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, fog: false,
+  uniforms: { top: { value: P.top }, hor: { value: P.hor }, sunD: { value: sunDir }, moonD: { value: moonDir }, glow: { value: P.sun }, night: { value: night * (1 - P.ov) }, ov: { value: P.ov }, phase: { value: S.phase }, sunUp: { value: S.sunAlt > -1 ? 1 : 0 }, moonUp: { value: S.moonAlt > 0 ? 1 : 0 } },
+  vertexShader: 'varying vec3 vD; void main(){ vD = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: `uniform vec3 top, hor, glow; uniform vec3 sunD, moonD; uniform float night, ov, phase, sunUp, moonUp; varying vec3 vD;
+    float h(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    void main(){
+      float y = max(vD.y, 0.0); vec3 c = mix(hor, top, pow(y, 0.55));
+      float s = max(dot(vD, sunD), 0.0); c += glow * pow(s, 8.0) * 0.35 * (1.0 - ov) + glow * pow(s, 90.0) * 0.4;
+      c = mix(c, vec3(1.0, 0.97, 0.9), smoothstep(0.9993, 0.9996, s) * sunUp * (1.0 - ov));
+      vec2 sp = vD.xz / (vD.y + 0.4) * 300.0; float st = step(0.9965, h(floor(sp))) * smoothstep(0.5, 0.1, length(fract(sp) - 0.5));
+      c += vec3(0.95, 0.96, 1.0) * st * night * smoothstep(0.05, 0.3, vD.y);
+      float m = dot(vD, moonD); float disc = smoothstep(0.99925, 0.9995, m);
+      c += vec3(0.7, 0.75, 0.9) * pow(max(m, 0.0), 220.0) * 0.4 * moonUp * night;
+      c = mix(c, vec3(0.95, 0.95, 0.92) * (0.35 + 0.65 * abs(phase * 2.0 - 1.0 < 0.0 ? 1.0 : 1.0 - abs(phase * 2.0 - 1.0))), disc * moonUp * (1.0 - ov * 0.9));
+      gl_FragColor = vec4(c, 1.0);
+    }`,
+}));
+scene.add(sky);
+
+// light: the sun (or the moon at night) and the sky's fill
+const key = new THREE.DirectionalLight(S.sunAlt > -3 ? P.sun : new THREE.Color(0x9fb0ff), S.sunAlt > -3 ? P.sunI : 1.3 * (S.moonAlt > 0 ? 0.4 + 0.6 * (1 - Math.abs(S.phase * 2 - 1)) : 0.25));
+key.position.copy(S.sunAlt > -3 ? sunDir : moonDir).multiplyScalar(200);
+scene.add(key);
+scene.add(new THREE.HemisphereLight(P.amb, P.grass.clone().multiplyScalar(0.6), P.ambI));
+
+// the land: a big flat-shaded grid, coloured by height and slope (grass, rock, snow)
+const SIZE = 420, SEG = 210;
+const geo = new THREE.PlaneGeometry(SIZE, SIZE, SEG, SEG).rotateX(-Math.PI / 2);
+geo.translate(0, 0, -150);
+const pos = geo.attributes.position;
+for (let i = 0; i < pos.count; i++) pos.setY(i, height(pos.getX(i), pos.getZ(i)));
+const land = geo.toNonIndexed(); land.computeVertexNormals();
+const lp = land.attributes.position, ln = land.attributes.normal, cols = new Float32Array(lp.count * 3);
+const snowLine = (S.season === 'winter' ? 8 : S.season === 'summer' ? 30 : 22) - S.gsnow * 20;
+for (let f = 0; f < lp.count; f += 3) {
+  const y = (lp.getY(f) + lp.getY(f + 1) + lp.getY(f + 2)) / 3, ny = ln.getY(f), x = lp.getX(f), z = lp.getZ(f);
+  let c = P.rock.clone().multiplyScalar(0.85 + 0.3 * vnoise(x * 0.3, z * 0.3, 2));
+  if (ny > 0.8 && y < 14) c = P.grass.clone().multiplyScalar(0.9 + 0.2 * vnoise(x * 0.2, z * 0.2, 4));
+  if (y > snowLine + 6 * (vnoise(x * 0.1, z * 0.1, 6) - 0.5) && ny > 0.45) c = P.snow.clone();
+  if (S.gsnow > 0.3 && ny > 0.6) c = P.snow.clone().multiplyScalar(0.92);
+  for (let k = 0; k < 3; k++) cols.set([c.r, c.g, c.b], (f + k) * 3);
+}
+land.setAttribute('color', new THREE.BufferAttribute(cols, 3));
+scene.add(new THREE.Mesh(land, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true })));
+
+// the forest: thousands of low-poly spruces (stacked cones), instanced, where the slope is gentle and below the treeline
+function spruceGeo() {
+  const parts = [];
+  for (let k = 0; k < 4; k++) { const r = 0.55 - k * 0.11, g = new THREE.ConeGeometry(r, 0.5, 7, 1); g.translate(0, 0.28 + k * 0.24, 0); parts.push(g); }
+  const trunk = new THREE.CylinderGeometry(0.05, 0.07, 0.3, 5); trunk.translate(0, 0.12, 0); parts.push(trunk);
+  let n = 0; for (const p of parts) n += p.toNonIndexed().attributes.position.count;
+  const out = new THREE.BufferGeometry(), arr = new Float32Array(n * 3), col = new Float32Array(n * 3); let o = 0;
+  parts.forEach((p, idx) => { const q = p.toNonIndexed(); arr.set(q.attributes.position.array, o * 3); const c = idx === 4 ? [0.35, 0.22, 0.15] : [1, 1, 1]; for (let i = 0; i < q.attributes.position.count; i++) col.set(c, (o + i) * 3); o += q.attributes.position.count; });
+  out.setAttribute('position', new THREE.BufferAttribute(arr, 3)); out.setAttribute('color', new THREE.BufferAttribute(col, 3)); out.computeVertexNormals();
+  return out;
+}
+const treeMat = new THREE.MeshLambertMaterial({ color: P.tree, vertexColors: true, flatShading: true });
+const r = RNG(LOC.seed * 97), spots = [];
+for (let i = 0; i < 22000 && spots.length < 7000; i++) {
+  const x = (r() - 0.5) * 300, z = -10 - r() * 190, y = height(x, z);
+  if (lakeD(x, z) > -0.06 || y > snowLine - 4 || y < LAKE_Y + 0.2) continue;
+  const e = 0.6, gx = height(x + e, z) - height(x - e, z), gz = height(x, z + e) - height(x, z - e); if (Math.hypot(gx, gz) / (2 * e) > 1.1) continue;
+  if (fbm(x * 0.05, z * 0.05, 21) < 0.4) continue;
+  if (LOC.cabin && Math.hypot(x - LOC.cabin.x, z - LOC.cabin.z) < 7) continue;
+  // keep the camera's corridor and its view across the lake open (only the framing pines stand close)
+  if (z > -45 && Math.abs(x) < 9 + (-z) * 0.45) continue;
+  spots.push([x, y, z, 2.2 + r() * 3.2, r() * 6.3]);
+}
+// the framing pines close to the camera, on both sides
+for (const [x, z, h] of [[-11, -6, 10], [-15, -13, 12], [12, -7, 11], [16, -15, 12], [-19, -24, 9], [20, -26, 10], [-26, -34, 9], [27, -36, 9]]) spots.push([x, height(x, z), z, h, 0]);
+const forest = new THREE.InstancedMesh(spruceGeo(), treeMat, spots.length);
+const m4 = new THREE.Matrix4(), q4 = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
+spots.forEach(([x, y, z, h, rot], i) => { m4.compose(new THREE.Vector3(x, y - 0.1, z), q4.setFromAxisAngle(up, rot), new THREE.Vector3(h * 0.42, h, h * 0.42)); forest.setMatrixAt(i, m4); });
+scene.add(forest);
+if (S.gsnow > 0.3) { // snow on the tree tiers: a second, paler, slightly smaller copy pushed up a little
+  const snowTrees = new THREE.InstancedMesh(spruceGeo(), new THREE.MeshLambertMaterial({ color: P.snow, flatShading: true, transparent: true, opacity: 0.55 * S.gsnow }), spots.length);
+  spots.forEach(([x, y, z, h, rot], i) => { m4.compose(new THREE.Vector3(x, y + h * 0.04, z), q4.setFromAxisAngle(up, rot + 0.4), new THREE.Vector3(h * 0.34, h * 0.96, h * 0.34)); snowTrees.setMatrixAt(i, m4); });
+  scene.add(snowTrees);
+}
+
+// the lake: a true mirror, tinted to the water's colour (or ice in winter)
+const lakeGeo = new THREE.CircleGeometry(1, 64); lakeGeo.rotateX(-Math.PI / 2);
+if (S.frozen) {
+  const ice = new THREE.Mesh(lakeGeo, new THREE.MeshLambertMaterial({ color: P.snow.clone().lerp(P.fog, 0.3) }));
+  ice.scale.set(LOC.lake.rx * 1.1, 1, LOC.lake.rz * 1.1); ice.position.set(LOC.lake.cx, LAKE_Y + 0.02, LOC.lake.cz); scene.add(ice);
+} else {
+  const mirror = new Reflector(new THREE.CircleGeometry(1, 64), { textureWidth: W, textureHeight: H, color: new THREE.Color(S.sunAlt > 0 ? 0x5fb8c4 : 0x4a5a8a) });
+  mirror.rotateX(-Math.PI / 2); mirror.scale.set(LOC.lake.rx * 1.1, LOC.lake.rz * 1.1, 1); mirror.position.set(LOC.lake.cx, LAKE_Y, LOC.lake.cz); scene.add(mirror);
+}
+
+// the cabin: logs, a roof, a chimney and warm windows
+let chimney = null;
+if (LOC.cabin) {
+  const c = LOC.cabin, gy = height(c.x, c.z), g = new THREE.Group(); g.position.set(c.x, gy, c.z); g.rotation.y = 0.5;
+  const log = new THREE.MeshLambertMaterial({ color: new THREE.Color(0x6a4630).lerp(P.tree, 0.2), flatShading: true });
+  const walls = new THREE.Mesh(new THREE.BoxGeometry(5, 2.6, 3.6), log); walls.position.y = 1.3; g.add(walls);
+  const roofG = new THREE.CylinderGeometry(2.6, 2.6, 5.6, 3, 1); roofG.rotateZ(Math.PI / 2); roofG.rotateX(Math.PI / 6);
+  const roof = new THREE.Mesh(roofG, new THREE.MeshLambertMaterial({ color: S.gsnow > 0.3 ? P.snow : new THREE.Color(0x6a2a24), flatShading: true })); roof.scale.set(1, 0.55, 0.85); roof.position.y = 3.25; g.add(roof);
+  const ch = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.8, 0.6), new THREE.MeshLambertMaterial({ color: 0x6a6460 })); ch.position.set(1.4, 4.0, -0.6); g.add(ch);
+  const glowOn = clamp((2 - S.sunAlt) / 6), winMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0x3a3a40).lerp(new THREE.Color(0xffc070), glowOn) });
+  for (const x of [-1.4, 1.4]) { const w = new THREE.Mesh(new THREE.PlaneGeometry(0.9, 0.8), winMat); w.position.set(x, 1.5, 1.81); g.add(w); }
+  if (glowOn > 0.1) { const pl = new THREE.PointLight(0xffb060, 30 * glowOn, 18, 2); pl.position.set(0, 1.6, 3); g.add(pl); }
+  scene.add(g); g.updateMatrixWorld(true);
+  chimney = new THREE.Vector3(1.4, 5.0, -0.6).applyMatrix4(g.matrixWorld);
+}
+// smoke: soft sprites rising and leaning with the wind
+const smokeTex = (() => { const c = document.createElement('canvas'); c.width = c.height = 64; const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32); gr.addColorStop(0, 'rgba(255,255,255,0.8)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(c); })();
+const puffs = [];
+if (chimney) for (let i = 0; i < 24; i++) { const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: smokeTex, color: P.fog.clone().lerp(new THREE.Color(0xdddddd), 0.4), transparent: true, depthWrite: false })); scene.add(s); puffs.push(s); }
+
+// falling snow or rain: points in a box around the camera
+let precip = null;
+if (S.snow > 0 || S.rain > 0) {
+  const n = Math.round(6000 * Math.max(S.snow, S.rain)), g = new THREE.BufferGeometry(), arr = new Float32Array(n * 3), rr = RNG(4);
+  for (let i = 0; i < n; i++) arr.set([(rr() - 0.5) * 80, rr() * 40, -rr() * 80], i * 3);
+  g.setAttribute('position', new THREE.BufferAttribute(arr, 3));
+  precip = new THREE.Points(g, new THREE.PointsMaterial({ color: S.snow ? 0xf4f6ff : 0xaab8d0, size: S.snow ? 0.22 : 0.08, transparent: true, opacity: 0.85, depthWrite: false }));
+  precip.userData.base = arr.slice(); scene.add(precip);
+}
+
+// ---------- the camera: one slow glide forward between the trees, never reversing ----------
+const SHOT = qn('shot', 90), SPEED = qn('speed', 1), camY = LOC.camY ?? 3.2;
+function camAt(t) {
+  const u = Q.has('push') ? qn('push', 0) : clamp(((t * SPEED) % SHOT) / SHOT), e = 1 - Math.pow(1 - u, 2);
+  const z = lerp(4, -26, e), x = lerp(-2.5, 2.5, u), y = camY + Math.max(height(x, z) + 1.6 - camY, 0) + 0.3 * Math.sin(u * 3);
+  return { pos: new THREE.Vector3(x, y, z), look: new THREE.Vector3(lerp(-8, 6, u) + LOC.lake.cx * 0.3, camY * 0.6 + 9, LOC.wallZ) };
+}
+
+window.renderAt = t => {
+  const c = camAt(t); camera.position.copy(c.pos); camera.lookAt(c.look);
+  sky.position.copy(camera.position);
+  // smoke
+  puffs.forEach((s, i) => { const age = ((t * 0.12 + i / puffs.length) % 1); s.position.set(chimney.x + age * age * (2 + S.wind * 0.25), chimney.y + age * 9, chimney.z + Math.sin(t * 0.5 + i) * 0.3 * age); const sc = 0.8 + age * 4; s.scale.set(sc, sc, 1); s.material.opacity = 0.45 * (1 - age); });
+  // snow drifts down and sideways, rain falls fast
+  if (precip) { const a = precip.geometry.attributes.position, b = precip.userData.base; for (let i = 0; i < a.count; i++) { const fall = S.snow ? (1.2 + (i % 7) * 0.15) : 18; let y = b[i * 3 + 1] - t * fall; y = ((y % 40) + 40) % 40; a.setXYZ(i, c.pos.x + b[i * 3] + (S.snow ? Math.sin(t * 0.7 + i) * 0.6 : 0) + t * S.wind * 0.05, c.pos.y - 8 + y, c.pos.z + b[i * 3 + 2]); } a.needsUpdate = true; }
+  renderer.render(scene, camera);
+};
+window.__ready = true;
+if (Q.has('t')) renderAt(+Q.get('t'));
+else if (!navigator.webdriver) { const t0 = performance.now(); (function loop() { renderAt((performance.now() - t0) / 1000); requestAnimationFrame(loop); })(); }
+</script></body></html>
