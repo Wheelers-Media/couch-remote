@@ -242,8 +242,8 @@ function drawLive(g, t, S, PL) {
   if (!S.frozen) {
     const sunLow = S.sunAlt > -1 && S.sunAlt < 20, gx = sunLow ? W * (0.5 + 0.42 * S.sunSide) : W * S.moonX;
     const ga = (sunLow ? clamp(1 - S.sunAlt / 20) : S.moonAlt > 0 ? clamp(S.moonPhase < 0.5 ? S.moonPhase * 2 : (1 - S.moonPhase) * 2) * night : 0) * (1 - PAL.ov);
-    if (ga > 0.05) for (let k = 0; k < 34; k++) {
-      const u = k / 34, [, , kk] = proj(0, 0, PL.lakeZ), y = wl + (6 + Math.pow(u, 1.4) * (H - wl - 10)) * kk, w = (10 + u * 70) * kk, x = proj(gx, 0, PL.lakeZ)[0] + Math.sin(t * 0.8 + k * 1.7) * w * 0.4 + (hash(k, 9) - 0.5) * w;
+    if (ga > 0.05) for (let k = 0; k < 60; k++) {
+      const u = k / 60, [, , kk] = proj(0, 0, PL.lakeZ), y = wl + (4 + Math.pow(u, 1.3) * (H - wl - 10)) * kk, w = (16 + u * 120) * kk * (0.6 + 0.8 * seeded(k, 7)), x = proj(gx, 0, PL.lakeZ)[0] + Math.sin(t * 0.8 + k * 1.7) * w * 0.4 + (hash(k, 9) - 0.5) * w;
       g.fillStyle = css(sunLow ? mixv(PAL.sky.glow, '#ffffff', 0.4) : [232, 236, 255], ga * (0.25 + 0.6 * (0.5 + 0.5 * Math.sin(t * 2 + k * 2.3))));
       g.fillRect(x - w / 2, y, w, 1.5 + u * 2);
     }
@@ -260,7 +260,7 @@ function drawLive(g, t, S, PL) {
 function moon(g, S, PAL, wl) {
   const x = W * S.moonX, y = wl - 70 - Math.min(S.moonAlt, 48) * 12.5, R = 34, vis = (1 - PAL.ov * 0.9) * (0.3 + 0.7 * clamp((-S.sunAlt + 2) / 10));
   if (vis < 0.05) return;
-  const gl = g.createRadialGradient(x, y, 0, x, y, R * 6); gl.addColorStop(0, `rgba(220,228,255,${0.25 * vis})`); gl.addColorStop(1, 'rgba(220,228,255,0)'); g.fillStyle = gl; g.fillRect(x - R * 6, y - R * 6, R * 12, R * 12);
+  const gl = g.createRadialGradient(x, y, 0, x, y, R * 11); gl.addColorStop(0, `rgba(220,228,255,${0.32 * vis})`); gl.addColorStop(0.2, `rgba(200,212,255,${0.14 * vis})`); gl.addColorStop(1, 'rgba(220,228,255,0)'); g.fillStyle = gl; g.fillRect(x - R * 11, y - R * 11, R * 22, R * 22);
   g.save(); g.globalAlpha = vis;
   g.beginPath(); g.arc(x, y, R, 0, TAU); g.fillStyle = css(mixv(PAL.sky.mid, '#30344c', 0.4), 0.8); g.fill();
   const ph = S.moonPhase, k = Math.cos(ph * TAU), waxing = ph < 0.5;

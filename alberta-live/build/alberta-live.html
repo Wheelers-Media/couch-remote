@@ -715,7 +715,10 @@ function treeline(g, ridge, x0, x1, n, hMin, hMax, col, r, o = {}) {
 // a flat range: the silhouette in its colour, lit faces and snow caps as flat shapes, mist rising from its foot
 function flatRange(g, ridge, base, col, o = {}) {
   const r = RNG(o.seed || 1), body = [[ridge[0][0], H + 40], ...ridge, [ridge[ridge.length - 1][0], H + 40]];
-  path(g, body); g.fillStyle = css(col); g.fill();
+  // the layer's body: a gradient, lighter at the crest (haze and backlight) and deeper at the foot
+  const crest = Math.min(...ridge.map(q => q[1])), bg = g.createLinearGradient(0, crest, 0, base + 40);
+  bg.addColorStop(0, css(o.crestCol ? mixv(col, o.crestCol, 0.35) : col)); bg.addColorStop(1, css(o.footCol ? mixv(col, o.footCol, 0.25) : col));
+  path(g, body); g.fillStyle = bg; g.fill();
   g.save(); path(g, body); g.clip();
   if (o.lit || o.snow) {
     const tops = summits(ridge, o.reach ?? 70, 24, base);
@@ -742,6 +745,16 @@ function flatRange(g, ridge, base, col, o = {}) {
         for (let i = 0; i <= n; i++) { const u = 1 - i / n, x = lerp(ridge[k0][0], ridge[k1][0], u); const e = Math.abs(u * 2 - 1); cap.push([x, Math.min(lineY(ridge, x) + 2 + depth * 0.25 * (1 - e), p[1] + depth * (1 - 0.7 * e) + (i % 2 ? 1 : -0.6) * depth * 0.2 * r())]); }
         path(g, cap); g.fillStyle = css(o.snow); g.fill();
       }
+    }
+  }
+  if (o.rim) { // a thin rim of light along the crest, strongest on the slopes that face the light
+    g.lineJoin = 'round';
+    for (let i = 1; i < ridge.length; i++) {
+      const a = ridge[i - 1], b = ridge[i], slope = (b[1] - a[1]) / Math.max(1, b[0] - a[0]), facing = (o.lightLeft ? -slope : slope);
+      const k = clamp(0.35 + facing * 1.2);
+      if (k < 0.05) continue;
+      g.strokeStyle = css(o.rim, (o.rimA ?? 0.7) * k); g.lineWidth = o.rimW ?? 2;
+      g.beginPath(); g.moveTo(a[0], a[1] + 1); g.lineTo(b[0], b[1] + 1); g.stroke();
     }
   }
   if (o.mist) { // mist pooled at the layer's foot: towards the haze colour
@@ -817,7 +830,7 @@ function makeLayered(S) {
     const gr = g.createLinearGradient(0, 0, 0, wl); gr.addColorStop(0, css(C.top)); gr.addColorStop(0.62, css(mixv(C.top, C.hor, 0.55))); gr.addColorStop(1, css(C.hor));
     g.fillStyle = gr; g.fillRect(0, 0, W, H);
     const sx = W * (0.5 + 0.3 * S.sunSide), sy = wl - 120 - Math.max(-3, S.sunAlt) * 16;
-    if (S.sunAlt > -10) { const k = clamp((S.sunAlt + 10) / 8) * clamp((40 - S.sunAlt) / 30) * (1 - C.ov * 0.8); const gl = g.createRadialGradient(sx, sy, 0, sx, sy, 800); gl.addColorStop(0, css(C.glow, 0.6 * k)); gl.addColorStop(1, css(C.glow, 0)); g.fillStyle = gl; g.fillRect(0, 0, W, H); }
+    if (S.sunAlt > -10) { const k = clamp((S.sunAlt + 10) / 8) * clamp((40 - S.sunAlt) / 30) * (1 - C.ov * 0.8); const gl = g.createRadialGradient(sx, sy, 0, sx, sy, 1100); gl.addColorStop(0, css(C.glow, 0.7 * k)); gl.addColorStop(0.25, css(C.glow, 0.32 * k)); gl.addColorStop(1, css(C.glow, 0)); g.fillStyle = gl; g.fillRect(0, 0, W, H); }
     if (S.sunAlt > -1.5 && C.ov < 0.6) { g.fillStyle = css(mixv(C.glow, '#ffffff', 0.5), 1 - C.ov); g.beginPath(); g.arc(sx, sy, 46, 0, TAU); g.fill(); }
     // a soft paper grain so the gradient never bands
     g.save(); g.globalCompositeOperation = 'overlay'; g.globalAlpha = 0.12; g.drawImage(paper(), 0, 0, W, H); g.restore();
@@ -836,6 +849,7 @@ function makeLayered(S) {
     PL.layers.push({ z, pl: makePlate(PX, 0, PW, H, 1, g => {
       const r = RNG(100 + i);
       flatRange(g, ridge, base, c, {
+        crestCol: mixv(C.hor, C.glow, 0.3), footCol: C.near, rim: mixv(C.glow, C.lit, 0.5), rimA: 0.55 - i * 0.08, rimW: 2.4 - i * 0.3,
         seed: 30 + i, lightLeft,
         lit: kind === 'peaks' && S.sunAlt > -10 ? mixv(c, C.lit, 0.35 + 0.2 * (1 - C.ov)) : kind === 'peaks' ? mixv(c, C.lit, 0.18) : null,
         snow: kind === 'peaks' ? mixv(mixv(C.snow, c, 0.25 + i * 0.12), C.hor, 0.1) : null, snowSh: kind === 'peaks' ? mixv(mixv(C.snow, C.near, 0.45), c, 0.3) : null,
@@ -1277,8 +1291,8 @@ function drawLive(g, t, S, PL) {
   if (!S.frozen) {
     const sunLow = S.sunAlt > -1 && S.sunAlt < 20, gx = sunLow ? W * (0.5 + 0.42 * S.sunSide) : W * S.moonX;
     const ga = (sunLow ? clamp(1 - S.sunAlt / 20) : S.moonAlt > 0 ? clamp(S.moonPhase < 0.5 ? S.moonPhase * 2 : (1 - S.moonPhase) * 2) * night : 0) * (1 - PAL.ov);
-    if (ga > 0.05) for (let k = 0; k < 34; k++) {
-      const u = k / 34, [, , kk] = proj(0, 0, PL.lakeZ), y = wl + (6 + Math.pow(u, 1.4) * (H - wl - 10)) * kk, w = (10 + u * 70) * kk, x = proj(gx, 0, PL.lakeZ)[0] + Math.sin(t * 0.8 + k * 1.7) * w * 0.4 + (hash(k, 9) - 0.5) * w;
+    if (ga > 0.05) for (let k = 0; k < 60; k++) {
+      const u = k / 60, [, , kk] = proj(0, 0, PL.lakeZ), y = wl + (4 + Math.pow(u, 1.3) * (H - wl - 10)) * kk, w = (16 + u * 120) * kk * (0.6 + 0.8 * seeded(k, 7)), x = proj(gx, 0, PL.lakeZ)[0] + Math.sin(t * 0.8 + k * 1.7) * w * 0.4 + (hash(k, 9) - 0.5) * w;
       g.fillStyle = css(sunLow ? mixv(PAL.sky.glow, '#ffffff', 0.4) : [232, 236, 255], ga * (0.25 + 0.6 * (0.5 + 0.5 * Math.sin(t * 2 + k * 2.3))));
       g.fillRect(x - w / 2, y, w, 1.5 + u * 2);
     }
@@ -1295,7 +1309,7 @@ function drawLive(g, t, S, PL) {
 function moon(g, S, PAL, wl) {
   const x = W * S.moonX, y = wl - 70 - Math.min(S.moonAlt, 48) * 12.5, R = 34, vis = (1 - PAL.ov * 0.9) * (0.3 + 0.7 * clamp((-S.sunAlt + 2) / 10));
   if (vis < 0.05) return;
-  const gl = g.createRadialGradient(x, y, 0, x, y, R * 6); gl.addColorStop(0, `rgba(220,228,255,${0.25 * vis})`); gl.addColorStop(1, 'rgba(220,228,255,0)'); g.fillStyle = gl; g.fillRect(x - R * 6, y - R * 6, R * 12, R * 12);
+  const gl = g.createRadialGradient(x, y, 0, x, y, R * 11); gl.addColorStop(0, `rgba(220,228,255,${0.32 * vis})`); gl.addColorStop(0.2, `rgba(200,212,255,${0.14 * vis})`); gl.addColorStop(1, 'rgba(220,228,255,0)'); g.fillStyle = gl; g.fillRect(x - R * 11, y - R * 11, R * 22, R * 22);
   g.save(); g.globalAlpha = vis;
   g.beginPath(); g.arc(x, y, R, 0, TAU); g.fillStyle = css(mixv(PAL.sky.mid, '#30344c', 0.4), 0.8); g.fill();
   const ph = S.moonPhase, k = Math.cos(ph * TAU), waxing = ph < 0.5;
